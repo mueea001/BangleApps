@@ -1,0 +1,19 @@
+{
+  "id": "salaatime",
+  "name": "SalaaTime",
+  "version": "0.01",
+  "description": "Displays Islamic prayer times with next prayer highlight.",
+  "icon": "app.png",
+  "type": "clock",
+  "tags": "clock,islam,muslim,prayer",
+  "supports": ["BANGLEJS2"],
+  "storage": [
+    {"name":"salaatime.app.js","url":"app.js"},
+    {"name":"salaatime.settings.js","url":"settings.js"},
+    {"name":"PrayTimes.js","url":"PrayTimes.js"},  /* <-- Make sure you provide this library */
+    {"name":"salaatime.settings.json","url":"settings.json"}
+  ],
+  "data": [
+    {"name":"salaatime.settings.json"}
+  ]
+}
