@@ -10,7 +10,7 @@
   "storage": [
     {"name":"salaatime.app.js","url":"app.js"},
     {"name":"salaatime.settings.js","url":"settings.js"},
-    {"name":"PrayTimes.js","url":"PrayTimes.js"},  /* <-- Make sure you provide this library */
+    {"name":"PrayTimes.js","url":"PrayTimes.js"},
     {"name":"salaatime.settings.json","url":"settings.json"}
   ],
   "data": [
