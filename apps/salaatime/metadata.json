@@ -1,16 +1,15 @@
 {
   "id": "salaatime",
-  "name": "SalaaTime",
-  "version": "0.01",
-  "description": "Displays Islamic prayer times with next prayer highlight.",
+  "name": "SalaaTime (API)",
+  "version": "0.02",
+  "description": "Displays Islamic prayer times from Masjid Al-Yaqeen API.",
   "icon": "app.png",
   "type": "clock",
-  "tags": "clock,islam,muslim,prayer",
+  "tags": "clock,islam,muslim,prayer,api",
   "supports": ["BANGLEJS2"],
   "storage": [
     {"name":"salaatime.app.js","url":"app.js"},
     {"name":"salaatime.settings.js","url":"settings.js"},
-    {"name":"PrayTimes.js","url":"PrayTimes.js"},
     {"name":"salaatime.settings.json","url":"settings.json"}
   ],
   "data": [

@@ -1,9 +1,4 @@
 {
-  "lat": 51.24,
-  "lon": -0.17,
-  "calcMethod": "ISNA",
-  "asrMethod": "Standard",
-  "hijriOffset": 0,
   "showHijri": true,
   "showSeconds": false
 }
