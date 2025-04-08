@@ -329,7 +329,7 @@ function queueDraw() {
 
 // --- Initial Setup ---
 g.clear(); // Clear screen once
-Bangle.loadWidgets(); // Load status widgets (battery, etc.)
+//Bangle.loadWidgets(); // Load status widgets (battery, etc.)
 
 // Initial fetch and draw
 fetchAndUpdateTimes(); // Start the first fetch
@@ -349,4 +349,4 @@ Bangle.on('lock', locked => {
 Bangle.setUI("clock"); // Set clock mode
 
 // Draw widgets after clock face elements
-Bangle.drawWidgets();
+//Bangle.drawWidgets();
