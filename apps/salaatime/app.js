@@ -160,7 +160,8 @@ function findNextPrayerFromList() {
 
   } else {
      // Construct ISO time for today's next prayer
-     const [hours, minutes] = nextPrayerTimeStr.split(':').map(Number);
+     const hours = nextPrayerTimeStr.split(':').map(Number)[0];
+     const minutes = nextPrayerTimeStr.split(':').map(Number)[1];
      nextPrayerISO = new Date(now);
      nextPrayerISO.setHours(hours, minutes, 0, 0);
 
@@ -177,12 +178,12 @@ function findNextPrayerFromList() {
      } else if (diffMins > 0) {
         timeToNextPrayer = `-${diffMins}m`;
      } else {
-        timeToNextPrayer = "Now"; // Or handle start of prayer time
+        t;limeToNextPrayer = "Now"; // Or handle start of prayer time
      }
   }
 
   nextPrayerInfo = {
-    name: prayerMap[nextPrayerKey]?.name || "N/A", // Get display name
+    name: prayerMap[nextPrayerKey].name,// || "N/A", // Get display name
     time: nextPrayerTimeStr, // Already HH:MM
     iso: nextPrayerISO
   };
