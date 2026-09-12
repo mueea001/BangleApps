@@ -1,18 +1,24 @@
 {
   "id": "salaatime",
   "name": "SalaaTime (API)",
-  "version": "0.02",
+  "version": "0.03",
+  "author": "You",
   "description": "Displays Islamic prayer times from Masjid Al-Yaqeen API.",
   "icon": "app.png",
+  "screenshots": [{"url":"screenshot.png"}],
+  "allow_emulator": true,
   "type": "clock",
   "tags": "clock,islam,muslim,prayer,api",
   "supports": ["BANGLEJS2"],
+  "readme": "README.md",
   "storage": [
     {"name":"salaatime.app.js","url":"app.js"},
     {"name":"salaatime.settings.js","url":"settings.js"},
-    {"name":"salaatime.settings.json","url":"settings.json"}
+    {"name":"salaatime.settings.json","url":"settings.json"},
+    {"name":"salaatime.img","url":"app-icon.js","evaluate":true}
   ],
   "data": [
-    {"name":"salaatime.settings.json"}
+    {"name":"salaatime.settings.json"},
+    {"name":"prayertimes.json"}
   ]
 }

@@ -3,8 +3,7 @@
 
   // Defaults
   const DEFAULTS = {
-    showHijri: true,
-    showSeconds: false
+    showHijri: true
   };
 
   // Helper function to load settings
@@ -35,11 +34,6 @@
         value: settings.showHijri,
         format: v => v ? 'On' : 'Off',
         onchange: v => { settings.showHijri = v; saveSettings(settings); }
-      },
-      'Show Seconds': {
-        value: settings.showSeconds,
-        format: v => v ? 'On' : 'Off',
-        onchange: v => { settings.showSeconds = v; saveSettings(settings); }
       }
       // Removed Lat, Lon, Calc Method, Asr Method, Hijri Offset menus
     };
