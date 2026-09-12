@@ -32,7 +32,6 @@
       '< Back': back,
       'Show Hijri': {
         value: settings.showHijri,
-        format: v => v ? 'On' : 'Off',
         onchange: v => { settings.showHijri = v; saveSettings(settings); }
       }
       // Removed Lat, Lon, Calc Method, Asr Method, Hijri Offset menus
