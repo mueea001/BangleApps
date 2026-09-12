@@ -49,7 +49,7 @@ var jsparse = (() => {
     return str => {throw new Error("no acorn")};
   }
 
-  return str => acorn.parse(str, { ecmaVersion: 2020 });
+  return str => acorn.parse(str, { ecmaVersion: 2022 });
 })();
 
 
@@ -84,11 +84,15 @@ function WARN(msg, opt) {
   console.log(`::warning${Object.keys(opt).length?" ":""}${Object.keys(opt).map(k=>k+"="+opt[k]).join(",")}::${msg}`);
   warningCount++;
 }
+function NOTIFY(msg, opt) {
+  // file=app.js,line=1,col=5,endColumn=7
+  opt = opt||{};
+  console.log(`::notice${Object.keys(opt).length?" ":""}${Object.keys(opt).map(k=>k+"="+opt[k]).join(",")}::${msg}`);
+}
 /* These are errors that we temporarily allow */
 var KNOWN_ERRORS = [
   "In locale en_CA, long date output must be shorter than 15 characters (Wednesday, September 10, 2024 -> 29)",
   "In locale fr_FR, long date output must be shorter than 15 characters (10 septembre 2024 -> 17)",
-  "In locale sv_SE, speed must be shorter than 5 characters",
   "In locale en_SE, long date output must be shorter than 15 characters (September 10 2024 -> 17)",
   "In locale en_NZ, long date output must be shorter than 15 characters (Wednesday, September 10, 2024 -> 29)",
   "In locale en_AU, long date output must be shorter than 15 characters (Wednesday, September 10, 2024 -> 29)",
@@ -113,6 +117,7 @@ var KNOWN_ERRORS = [
 var KNOWN_WARNINGS = [
   "App gpsrec data file wildcard .gpsrc? does not include app ID",
   "App owmweather data file weather.json is also listed as data file for app weather",
+  "App loadanim data file .loading is also listed as data file for app loadingscreen",
   "App carcrazy has a setting file but no corresponding data entry (add `\"data\":[{\"name\":\"carcrazy.settings.json\"}]`)",
   "App loadingscreen has a setting file but no corresponding data entry (add `\"data\":[{\"name\":\"loadingscreen.settings.json\"}]`)",
   "App trex has a setting file but no corresponding data entry (add `\"data\":[{\"name\":\"trex.settings.json\"}]`)",
@@ -163,19 +168,22 @@ const APP_KEYS = [
   'id', 'name', 'shortName', 'version', 'icon', 'screenshots', 'description', 'tags', 'type',
   'sortorder', 'readme', 'custom', 'customConnect', 'interface', 'storage', 'data',
   'supports', 'allow_emulator',
-  'dependencies', 'provides_modules', 'provides_widgets', 'provides_features', "default"
+  'dependencies', 'provides_modules', 'provides_widgets', 'provides_features', "default",
+  "author","requires_firmware"
 ];
 const STORAGE_KEYS = ['name', 'url', 'content', 'evaluate', 'noOverwite', 'supports', 'noOverwrite'];
 const DATA_KEYS = ['name', 'wildcard', 'storageFile', 'url', 'content', 'evaluate'];
-const SUPPORTS_DEVICES = ["BANGLEJS","BANGLEJS2"]; // device IDs allowed for 'supports'
+const SUPPORTS_DEVICES = ["BANGLEJS","BANGLEJS2","BANGLEJS3","BANGLEJS3_COMPAT"]; // device IDs allowed for 'supports'
 const METADATA_TYPES = ["app","clock","widget","bootloader","RAM","launch","scheduler","notify","locale","settings","textinput","module","clkinfo","defaultconfig"]; // values allowed for "type" field - listed in README.md
 const FORBIDDEN_FILE_NAME_CHARS = /[,;]/; // used as separators in appid.info
+const MAX_FILE_NAME_LENGTH = 28
 const VALID_DUPLICATES = [ '.tfmodel', '.tfnames' ];
 const GRANDFATHERED_ICONS = ["s7clk",  "snek", "astral", "alpinenav", "slomoclock", "arrow", "pebble", "rebble"];
 const INTERNAL_FILES_IN_APP_TYPE = { // list of app types and files they SHOULD provide...
   'textinput' : ['textinput'],
   // notify?
 };
+const ID_NAMING_EXCEPTIONS = ["1button", "airqualityci", "banglebridge", "chimer", "f3bluemoon", "gbridge", "gpsautotime", "gpstimeserver", "grandfatherclock", "hralarm", "hwid_a_battery_widget", "lightswitch", "openseizure", "rndmclk", "sleeplogalarm", "worldclkinfo"];
 
 function globToRegex(pattern) {
   const ESCAPE = '.*+-?^${}()|[]\\';
@@ -243,6 +251,8 @@ apps.forEach((app,appIdx) => {
   }
   if (!app.description) ERROR(`App ${app.id} has no description`, {file:metadataFile});
   if (!app.icon) ERROR(`App ${app.id} has no icon`, {file:metadataFile});
+  if (app.type == "widget" && !app.id.startsWith("wid") && !ID_NAMING_EXCEPTIONS.includes(app.id)) ERROR(`Widget app ${app.id} id does not start with 'wid'`, {file:metadataFile});
+  if (app.type == "clkinfo" && !app.id.startsWith("clkinfo") && !ID_NAMING_EXCEPTIONS.includes(app.id)) ERROR(`ClockInfo app ${app.id} id does not start with 'clkinfo'`, {file:metadataFile});
   if (!fs.existsSync(appDir+app.icon)) ERROR(`App ${app.id} icon doesn't exist`, {file:metadataFile});
   if (app.screenshots) {
     if (!Array.isArray(app.screenshots)) ERROR(`App ${app.id} screenshots is not an array`, {file:metadataFile});
@@ -251,6 +261,7 @@ apps.forEach((app,appIdx) => {
         ERROR(`App ${app.id} screenshot file ${screenshot.url} not found`, {file:metadataFile});
     });
   }
+  if(!app.author) ERROR(`App ${app.id} doesn't have an author field`, {file:metadataFile});
   if (app.readme) {
     if (!fs.existsSync(appDir+app.readme))
       ERROR(`App ${app.id} README file doesn't exist`, {file:metadataFile});
@@ -275,6 +286,10 @@ apps.forEach((app,appIdx) => {
     } else
       ERROR(`App ${app.id} 'dependencies' must be an object`, {file:metadataFile});
   }
+  if (!app.storage) {
+    ERROR(`App ${app.id} metadata has no "storage" field`, {file:metadataFile});
+    return;
+  }
 
   if (app.storage.find(f=>f.name.endsWith(".clkinfo.js")) && !appTags.includes("clkinfo"))
     WARN(`App ${app.id} provides ...clkinfo.js but doesn't have clkinfo tag`, {file:metadataFile});
@@ -282,6 +297,7 @@ apps.forEach((app,appIdx) => {
   app.storage.forEach((file) => {
     if (!file.name) ERROR(`App ${app.id} has a file with no name`, {file:metadataFile});
     if (isGlob(file.name)) ERROR(`App ${app.id} storage file ${file.name} contains wildcards`, {file:metadataFile});
+    if (file.name.length > MAX_FILE_NAME_LENGTH) ERROR(`App ${app.id} storage file name ${file.name} is longer than ${MAX_FILE_NAME_LENGTH} characters}`, {file:metadataFile})
     let char = file.name.match(FORBIDDEN_FILE_NAME_CHARS)
     if (char) ERROR(`App ${app.id} storage file ${file.name} contains invalid character "${char[0]}"`, {file:metadataFile})
     if (fileNames.includes(file.name) && !file.supports)  // assume that there aren't duplicates if 'supports' is set
@@ -343,6 +359,10 @@ apps.forEach((app,appIdx) => {
         if (a>=0 && b>=0 && a<b)
           WARN(`Clock ${app.id} file calls loadWidgets before setUI (clock widget/etc won't be aware a clock app is running)`, {file:appDirRelative+file.url, line : fileContents.substr(0,a).split("\n").length});
       }
+      if (fileContents.includes("clock_info") && (!app.dependencies || !app.dependencies.clock_info) && !["boot","clock_info"].includes(app.id))
+        ERROR(`App ${app.id}'s uses clock_info but doesn't have a dependency on it`, {file:appDirRelative+file.url});
+      if (fileContents.includes("clockbg") && (!app.dependencies || !app.dependencies.clockbg) && !["clockbg"].includes(app.id))
+        ERROR(`App ${app.id}'s uses clockbg but doesn't have a dependency on it`, {file:appDirRelative+file.url});
       // if settings
       if (/\.settings?\.js$/.test(file.name)) {
         // suggest adding to datafiles
@@ -401,6 +421,8 @@ apps.forEach((app,appIdx) => {
       ERROR(`App ${app.id} data file ${data.name} has both name and wildcard`, {file:metadataFile});
     if (isGlob(data.name))
       ERROR(`App ${app.id} data file name ${data.name} contains wildcards`, {file:metadataFile});
+    if (data.name && data.name.length > MAX_FILE_NAME_LENGTH)
+      ERROR(`App ${app.id} data file name ${data.name} is longer than ${MAX_FILE_NAME_LENGTH} characters}`, {file:metadataFile})
     if (data.wildcard) {
       if (!isGlob(data.wildcard))
         ERROR(`App ${app.id} data file wildcard ${data.wildcard} does not actually contains wildcard`, {file:metadataFile});
@@ -497,7 +519,7 @@ while(fileA=allFiles.pop()) {
     if (globA.test(nameB)||globB.test(nameA)) {
       if (isGlob(nameA)||isGlob(nameB))
         ERROR(`App ${fileB.app} ${typeB} file ${nameB} matches app ${fileA.app} ${typeB} file ${nameA}`);
-      else if (fileA.app != fileB.app && (!fileA.internal) && (!fileB.internal))
+      else if (fileA.app != fileB.app && (!fileA.internal) && (!fileB.internal) && nameB!="launch.cache.json")
         WARN(`App ${fileB.app} ${typeB} file ${nameB} is also listed as ${typeA} file for app ${fileA.app}`, {file:APPSDIR_RELATIVE+fileB.app+"/metadata.json"});
     }
   })
@@ -526,11 +548,11 @@ function sanityCheckLocales(){
 promise.then(function() {
   KNOWN_ERRORS.forEach(msg => {
     if (!errorList.includes(msg))
-      WARN(`Known error '${msg}' no longer occurs`);
+      NOTIFY(`Known error '${msg}' no longer occurs`);
   });
   KNOWN_WARNINGS.forEach(msg => {
     if (!warningList.includes(msg))
-      WARN(`Known warning '${msg}' no longer occurs`);
+      NOTIFY(`Known warning '${msg}' no longer occurs`);
   });
   console.log("==================================");
   console.log(`${errorCount} errors, ${warningCount} warnings`);

@@ -2,7 +2,7 @@ exports.gbSend = function(message) {
   Bluetooth.println("");
   Bluetooth.println(JSON.stringify(message));
 }
-let lastMsg, // for music messages - may not be needed now...
+let lastMsg, // for GadgetBridge workaround - may not be needed now...
     gpsState = {}, // keep information on GPS via Gadgetbridge
     settings = Object.assign({rp:true,as:true,vibrate:".."},
       require("Storage").readJSON("android.settings.json",1)||{}
@@ -38,10 +38,13 @@ exports.gbHandler = (event) => {
     },
     // {t:"musicstate", state:"play/pause",position,shuffle,repeat}
     "musicstate" : function() {
+      if (event.state===exports.musicState) return; // no change - avoid spamming message handling with identical messages
+      exports.musicState = event.state;
       require("messages").pushMessage({t:"modify",id:"music",title:"Music",state:event.state});
     },
     // {t:"musicinfo", artist,album,track,dur,c(track count),n(track num}
     "musicinfo" : function() {
+      event.album = event.album||"";
       require("messages").pushMessage(Object.assign(event, {t:"modify",id:"music",title:"Music"}));
     },
     // {t:"audio", v:(percentage of max volume for android STREAM_MUSIC)}
@@ -185,8 +188,10 @@ exports.gbHandler = (event) => {
     "act": function() {
       if (exports.actInterval) clearInterval(exports.actInterval);
       exports.actInterval = undefined;
-      if (exports.actHRMHandler)
+      if (exports.actHRMHandler) {
+        Bangle.removeListener('HRM', exports.actHRMHandler);
         exports.actHRMHandler = undefined;
+      }
       Bangle.setHRMPower(event.hrm,"androidact");
       if (!(event.hrm || event.stp)) return;
       if (!isFinite(event.int)) event.int=1;
@@ -232,8 +237,8 @@ exports.gbHandler = (event) => {
     },
     //{t:"listRecs", id:"20230616a"}
     "listRecs": function() {
-      let recs = require("Storage").list(/^recorder\.log.*\.csv$/,{sf:true}).map(s => s.slice(12, 21));
-      if (event.id.length > 2) { // Handle if there was no id supplied. Then we send a list all available recorder logs back.
+      let recs = require("Storage").list(/^recorder\.log.*\.csv$/,{sf:true}).map(s => s.slice(12, 21)).filter(s => s.length>7 /*ignore 'old' tracks without date*/);
+      if (event.id && event.id.length > 2) { // Handle if there was no id supplied. Then we send a list all available recorder logs back.
         let firstNonsyncedIdx = recs.findIndex((logId) => logId > event.id);
         if (-1 == firstNonsyncedIdx) {
           recs = []
@@ -321,6 +326,7 @@ exports.httpHandler = (url,options) => {
   if (options.method) req.method = options.method;
   if (options.body) req.body = options.body;
   if (options.headers) req.headers = options.headers;
+  req.timeout = options.timeout || 30000;
   exports.gbSend(req);
   //create the promise
   var promise = new Promise(function(resolve,reject) {
@@ -329,7 +335,7 @@ exports.httpHandler = (url,options) => {
       //if after "timeoutMillisec" it still hasn't answered -> reject
       delete Bangle.httpRequest[options.id];
       reject("Timeout");
-    },options.timeout||30000)};
+    },req.timeout+500)};
   });
   return promise;
 };
