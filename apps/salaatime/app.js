@@ -62,12 +62,21 @@ function draw() {
   g.setFont("Vector", 44).setFontAlign(0, -1).setColor(g.theme.fg);
   g.drawString(timeStr, w/2, 5);
 
-  // 2. Gregorian Date
-  g.setFont("6x8", 1.5).drawString(require("locale").date(d, 1), w/2, 52);
+  // 2. Weekday + Gregorian Date (larger when the hijri date is hidden)
+  var loc = require("locale");
+  var hijriShown = settings.showHijri && prayerData && prayerData.hijri_date_convert;
+  g.setFontAlign(0, -1).setColor(g.theme.fg);
+  if (hijriShown) {
+    g.setFont("6x8", 1).drawString(loc.dow(d, 1), w/2, 44);
+    g.setFont("6x8", 1.5).drawString(loc.date(d, 1), w/2, 54);
+  } else {
+    g.setFont("6x8", 1.5).drawString(loc.dow(d, 1), w/2, 44);
+    g.setFont("6x8", 2).drawString(loc.date(d, 1), w/2, 60);
+  }
 
   if (prayerData) {
-    if (settings.showHijri && prayerData.hijri_date_convert) {
-      g.setFont("6x8", 1).setColor(0, 1, 0).drawString(prayerData.hijri_date_convert, w/2, 70);
+    if (hijriShown) {
+      g.setFont("6x8", 1).setColor(0, 1, 0).drawString(prayerData.hijri_date_convert, w/2, 68);
     }
 
     var tomFajr = (prayerData.tomorrow) ? toMins(prayerData.tomorrow.fajr_begins) : toMins(prayerData.fajr_begins);

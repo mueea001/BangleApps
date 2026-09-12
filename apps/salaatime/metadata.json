@@ -1,7 +1,7 @@
 {
   "id": "salaatime",
   "name": "SalaaTime (API)",
-  "version": "0.03",
+  "version": "0.04",
   "author": "You",
   "description": "Displays Islamic prayer times from Masjid Al-Yaqeen API.",
   "icon": "app.png",

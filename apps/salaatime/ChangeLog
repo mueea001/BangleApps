@@ -1,3 +1,4 @@
 0.01: New App!
 0.02: Rewritten as a clean prayer-times watchface with Jamah times, current-prayer highlighting and offline caching
 0.03: Add app icon, screenshots and README; replace settings.json storage entry with a data file; remove redundant boolean formatters
+0.04: Show current weekday; enlarge Gregorian date when hijri date is hidden
