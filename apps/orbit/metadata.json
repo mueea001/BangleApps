@@ -1,10 +1,10 @@
 {
   "id": "orbit",
-  "name": "orbit",
-  "shortName": "orbit",
-  "version": "0.04",
+  "name": "tenkyu",
+  "shortName": "tenkyu",
+  "version": "0.067",
   "author": "onisY",
-  "description": "Sun-Earth-Moon clock with integrated calendar.",
+  "description": "Sun-Earth-Moon clock with eclipse shading, five-stage rest graph, non-wear sensing and immediate visual feedback on screen transitions.",
   "icon": "app.png",
   "type": "clock",
   "tags": "clock,science,astronomy,calendar,moon",
@@ -31,6 +31,10 @@
       "url": "locations.js"
     },
     {
+      "name": "orbittz",
+      "url": "timezone.js"
+    },
+    {
       "name": "orbitjp.dat",
       "url": "japan-municipalities.dat"
     },
@@ -38,6 +42,30 @@
       "name": "orbit.img",
       "url": "app-icon.js",
       "evaluate": true
+    },
+    {
+      "name": "orbit.eclipse",
+      "url": "eclipse.js"
+    },
+    {
+      "name": "orbit.ecldata",
+      "url": "eclipse-terms.js"
+    },
+    {
+      "name": "orbit.ecldraw",
+      "url": "eclipse-render.js"
+    },
+    {
+      "name": "orbit.eclsun",
+      "url": "eclipse-sun-terms.js"
+    },
+    {
+      "name": "orbit.rest",
+      "url": "rest.js"
+    },
+    {
+      "name": "orbit.boot.js",
+      "url": "boot.js"
     }
   ],
   "data": [
@@ -49,6 +77,9 @@
     },
     {
       "name": "orbit.events.json"
+    },
+    {
+      "name": "orbit.rest.json"
     }
   ]
 }

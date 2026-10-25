@@ -1,12 +1,30 @@
-/* orbit 0.04 stable */
+/* tenkyu 0.067 (orbit storage) */
 (function(){
   var W=g.getWidth(),H=g.getHeight();
   var Storage=require("Storage"),CFGFILE="orbit.json";
   var cfg=Storage.readJSON(CFGFILE,1)||{};
+  var sysCfg=Storage.readJSON("setting.json",1)||{};
+  var VIEWLIGHT_MS=isFinite(sysCfg.timeout)&&sysCfg.timeout>0?
+    Math.max(1000,+sysCfg.timeout*1000):10000; // Never leave touch/backlight on indefinitely.
+  sysCfg=undefined;
   /* Normalize persisted settings and migrate legacy coordinates once. */
   (function(){
     var changed=false;
     function set(k,v){if(cfg[k]!==v){cfg[k]=v;changed=true;}}
+
+    /* Default to the Chiyoda ward office without loading place tables.
+       Preserve any previously selected place, manual coordinates or GPS fix. */
+    if(cfg.locationSource===undefined&&cfg.locationMode===undefined&&
+       !cfg.locName&&!cfg.locPref&&cfg.manualLat===undefined&&cfg.manualLon===undefined&&
+       cfg.lat===undefined&&cfg.lon===undefined&&cfg.countryName===undefined&&
+       cfg.pref===undefined&&cfg.municipality===undefined&&cfg.place===undefined){
+      set("locationSource","place");set("locationMode",0);
+      set("countryName","Japan");set("locPref","Tokyo");set("locName","Chiyoda-ku");
+      set("pref",12);set("municipality",0);set("place",0);set("placeStateVersion",1);
+      set("manualLat",35.694);set("manualLon",139.7536);
+      set("tzBase",540);set("tzRule",0);
+    }
+
     var sun=isFinite(cfg.sunSize)?(cfg.sunSize|0):8;
     var earth=isFinite(cfg.earthSize)?(cfg.earthSize|0):42;
     var moon=isFinite(cfg.moonSize)?(cfg.moonSize|0):15;
@@ -18,6 +36,15 @@
     orb=Math.max(mn,Math.min(70,orb));
     set("sunSize",sun);set("earthSize",earth);set("moonSize",moon);set("moonOrbit",orb);
     set("layoutVersion",2);
+    var dp=isFinite(cfg.datePos)?(cfg.datePos|0):2,tp=isFinite(cfg.timePos)?(cfg.timePos|0):0;
+    var ds=isFinite(cfg.dateSize)?(cfg.dateSize|0):22,ts=isFinite(cfg.timeSize)?(cfg.timeSize|0):22;
+    set("datePos",Math.max(0,Math.min(2,dp)));set("timePos",Math.max(0,Math.min(2,tp)));
+    set("dateSize",Math.max(12,Math.min(30,ds)));set("timeSize",Math.max(12,Math.min(30,ts)));
+    /* Bangle time remains the default. Place time is opt-in. */
+    set("timeSource",(cfg.timeSource===1||cfg.timeSource==="1")?1:0);
+    set("orbitHourSize",Math.max(6,Math.min(12,isFinite(cfg.orbitHourSize)?cfg.orbitHourSize|0:8)));
+    set("orbitHourStep",[1,2,3,6].indexOf(cfg.orbitHourStep)>=0?cfg.orbitHourStep:1);
+    set("orbitHourEnabled",cfg.orbitHourEnabled===undefined?false:cfg.orbitHourEnabled!==false);
 
     var lat,lon;
     if(cfg.coordVersion!==2){
@@ -33,6 +60,17 @@
     set("manualLat",lat);set("manualLon",lon);
     if(cfg.lat!==undefined){delete cfg.lat;changed=true;}
     if(cfg.lon!==undefined){delete cfg.lon;changed=true;}
+
+    /* Keep a string location source as the canonical display selector.
+       Migrate older numeric locationMode values without changing coordinates. */
+    var src=cfg.locationSource;
+    if(src!=="place"&&src!=="manual"&&src!=="gps"){
+      src=(cfg.locationMode===0||cfg.locationMode==="0")?"place":
+          ((cfg.locationMode===2||cfg.locationMode==="2")?"gps":"manual");
+      set("locationSource",src);
+    }
+    set("locationMode",src==="place"?0:(src==="gps"?2:1));
+
     if(changed)try{Storage.writeJSON(CFGFILE,cfg);}catch(e){}
   })();
   /* GPS is settings-only; release any stale settings-owned request. */
@@ -43,12 +81,19 @@
     if(calSource){calModule=eval(calSource);calendar=calModule.create();}
     calSource=undefined;
   }catch(calErr){calModule=undefined;calendar=undefined;}
-  var BLACK=0x0000,WHITE=0xFFFF,NAVY=0x000F,DARKBLUE=0x0008,CYAN=0x07FF,YELLOW=0xFFE0,ORANGE=0xFD20,RED=0xF800,GREEN=0x07E0;
-  var busy=false,killed=false,minuteTimer,secondTimer,idleTimer,tapTimer,unlockTimer;
-  var mode="orbit",interactive=true,tapCount=0,resetOnWake=false;
+  var BLACK=0x0000,WHITE=0xFFFF,NAVY=0x000F,DARKBLUE=0x0008,CYAN=0x07FF,YELLOW=0xFFE0,ORANGE=0xFD20,RED=0xF800,GREEN=0x04C0;
+  var ECLIPSE_ENABLED=cfg.eclipseEnabled===undefined?true:cfg.eclipseEnabled!==false;
+  var ECLIPSE_UPDATE_MS=30000,eclipseDisplay,eclipseActive=false,lastClockMinute=-1;
+  var nextEclipseCheck=0;
+  // Once per 5-minute slot, cache day/night for the 288 recorded bars.
+  var restDay=new Uint8Array(288),restDaySlot=new Uint32Array(288);
+  var REST_ENABLED=cfg.restEnabled!==false;
+  var REST_MAX_HEIGHT=Math.max(1,Math.min(14,isFinite(cfg.restBarHeight)?cfg.restBarHeight|0:10));
+  var restService;
+  var busy=false,killed=false,minuteTimer,idleTimer,tapTimer,transitionTimer;
+  var mode="tenkyu",interactive=true,tapCount=0,resetOnWake=false;
   var selectedDayOffset=0,hasSelectedDate=false;
-  var colonX=0,colonVisible=true,batteryCharging=false;
-  var BATLEFT=138;
+  var nativeDrawWidgets,widgetDrawWrapper;
   var SUNR=Math.max(6,Math.min(15,cfg.sunSize|0));
   var EARTHR=Math.max(40,Math.min(45,cfg.earthSize|0));
   var MOONR=Math.max(14,Math.min(16,cfg.moonSize|0));
@@ -66,9 +111,23 @@
   var TESTLAT=Math.max(-90,Math.min(90,+cfg.manualLat));
   var TESTLON=Math.max(-180,Math.min(180,+cfg.manualLon));
   var VIEW_SOUTH=!!cfg.viewSide;
-  /* Copy only location fields needed by the clock; place tables stay unloaded. */
-  var LOCMODE=(cfg.locationMode===0?0:(cfg.locationMode===2?2:1));
-  var LOCNAME=(LOCMODE===0?(cfg.locName||cfg.locPref||"Place"):"");
+  var DATEPOS=cfg.datePos|0,TIMEPOS=cfg.timePos|0,DATESIZE=cfg.dateSize|0,TIMESIZE=cfg.timeSize|0;
+  var TIMEBOX,lastBaseBucket=-1;
+  var TIMESOURCE=cfg.timeSource===1?1:0;
+  var HOURSIZE=cfg.orbitHourSize|0,HOURSTEP=cfg.orbitHourStep|0;
+  var HOURENABLED=cfg.orbitHourEnabled;
+  var ROMAN=["XII","I","II","III","IV","V","VI","VII","VIII","IX","X","XI"];
+  var PLACETZ=isFinite(cfg.tzBase)?+cfg.tzBase:NaN;
+  var PLACEDST=isFinite(cfg.tzRule)?(cfg.tzRule|0):0;
+  /* Copy only location fields needed by the clock; place tables stay unloaded.
+     The saved label is also used as a recovery cue for older/stale source flags. */
+  var savedLocName=cfg.locName||"",savedLocPref=cfg.locPref||"";
+  var LOCSOURCE=(savedLocName==="GPS"||savedLocPref==="GPS")?"gps":
+    ((savedLocName==="Custom"||savedLocPref==="Manual")?"manual":
+    ((savedLocName||savedLocPref)?"place":
+    (cfg.locationSource||((cfg.locationMode===0)?"place":((cfg.locationMode===2)?"gps":"manual")))));
+  var LOCMODE=LOCSOURCE==="place"?0:(LOCSOURCE==="gps"?2:1);
+  var LOCNAME=(LOCMODE===0?(savedLocName||savedLocPref||"Place"):"");
   var LOCCOUNTRY=(LOCMODE===0?(cfg.countryName||"Japan"):"");
   var LOCLAT=Math.abs(TESTLAT).toFixed(3)+(TESTLAT<0?"S":"N");
   var LOCLON=Math.abs(TESTLON).toFixed(3)+(TESTLON<0?"W":"E");
@@ -138,6 +197,110 @@
   function virtualNowMs(){return Date.now()+selectedDayOffset*86400000;}
   function virtualDate(){return new Date(virtualNowMs());}
 
+  /* Espruino's Date local getters obey the Bangle timezone/DST setting.
+     Astronomical calculations must not, so UTC parts are parsed from ISO,
+     whose Espruino representation is always GMT. */
+  function utcParts(ms){
+    var z=new Date(ms).toISOString();
+    return {y:+z.substr(0,4),m:+z.substr(5,2),d:+z.substr(8,2),
+      h:+z.substr(11,2),mi:+z.substr(14,2),s:+z.substr(17,2)};
+  }
+  function localParts(ms){
+    var d=new Date(ms);
+    return {y:d.getFullYear(),m:d.getMonth()+1,d:d.getDate(),
+      h:d.getHours(),mi:d.getMinutes(),s:d.getSeconds()};
+  }
+  function daysInMonth(y,m){
+    if(m===2)return ((y%4===0&&y%100!==0)||y%400===0)?29:28;
+    return [31,0,31,30,31,30,31,31,30,31,30,31][m-1];
+  }
+  function utcMs(y,m,d,h,mi){
+    return Date.parse(y+"-"+pad(m)+"-"+pad(d)+"T"+pad(h||0)+":"+pad(mi||0)+":00Z");
+  }
+  function weekdayUTC(y,m,d){
+    var w=(Math.floor(utcMs(y,m,d,0,0)/86400000)+4)%7;
+    return w<0?w+7:w;
+  }
+  function nthDow(y,m,dow,n){
+    return 1+((dow-weekdayUTC(y,m,1)+7)%7)+7*(n-1);
+  }
+  function lastDow(y,m,dow){
+    var d=daysInMonth(y,m);
+    return d-((weekdayUTC(y,m,d)-dow+7)%7);
+  }
+  function localTransition(y,m,d,h,mi,offsetMin){
+    return utcMs(y,m,d,h,mi)-offsetMin*60000;
+  }
+
+  /* Compact civil-time rules used only by Place time.
+     Rule ids are stored in orbittz; astronomy never calls this function. */
+  function placeOffset(ms){
+    var base=PLACETZ,rule=PLACEDST;
+    if(!isFinite(base))return 0;
+    if(!rule)return base;
+    var y=utcParts(ms).y,start=0,end=0,day;
+
+    if(rule===1){ /* Europe: last Sun Mar/Oct, 01:00 UTC */
+      start=utcMs(y,3,lastDow(y,3,0),1,0);
+      end=utcMs(y,10,lastDow(y,10,0),1,0);
+    }else if(rule===2){ /* US/Canada: local 02:00 */
+      start=localTransition(y,3,nthDow(y,3,0,2),2,0,base);
+      end=localTransition(y,11,nthDow(y,11,0,1),2,0,base+60);
+    }else if(rule===3){ /* SE Australia */
+      start=localTransition(y,10,nthDow(y,10,0,1),2,0,base);
+      end=localTransition(y,4,nthDow(y,4,0,1),3,0,base+60);
+    }else if(rule===4){ /* New Zealand */
+      start=localTransition(y,9,lastDow(y,9,0),2,0,base);
+      end=localTransition(y,4,nthDow(y,4,0,1),3,0,base+60);
+    }else if(rule===5){ /* Cuba */
+      start=localTransition(y,3,nthDow(y,3,0,2),0,0,base);
+      end=localTransition(y,11,nthDow(y,11,0,1),1,0,base+60);
+    }else if(rule===6){ /* Chile: midnight after first Sat */
+      day=nthDow(y,9,6,1);
+      start=localTransition(y,9,day,0,0,base)+86400000;
+      day=nthDow(y,4,6,1);
+      end=localTransition(y,4,day,0,0,base+60)+86400000;
+    }else if(rule===7){ /* Egypt: last Fri Apr to midnight after last Thu Oct */
+      start=localTransition(y,4,lastDow(y,4,5),0,0,base);
+      day=lastDow(y,10,4);
+      end=localTransition(y,10,day,0,0,base+60)+86400000;
+    }else if(rule===8){ /* Israel */
+      day=lastDow(y,3,0)-2;
+      start=localTransition(y,3,day,2,0,base);
+      end=localTransition(y,10,lastDow(y,10,0),2,0,base+60);
+    }else if(rule===9){ /* Palestine */
+      start=localTransition(y,3,lastDow(y,3,6),2,0,base);
+      end=localTransition(y,10,lastDow(y,10,6),2,0,base+60);
+    }else if(rule===10){ /* Lebanon */
+      start=localTransition(y,3,lastDow(y,3,0),0,0,base);
+      end=localTransition(y,10,lastDow(y,10,0),0,0,base+60);
+    }else if(rule===11){ /* Morocco: UTC+1 except Ramadan suspension.
+                            tzdb-projected transition windows, 2025-2036. */
+      var mr=[
+        [2025,2,23,2025,4,6],[2026,2,15,2026,3,22],[2027,2,7,2027,3,14],
+        [2028,1,23,2028,3,5],[2029,1,14,2029,2,18],[2029,12,30,2030,2,10],
+        [2030,12,22,2031,1,26],[2031,12,14,2032,1,18],[2032,11,28,2033,1,9],
+        [2033,11,20,2033,12,25],[2034,11,5,2034,12,17],
+        [2035,10,28,2035,12,9],[2036,10,19,2036,11,23]
+      ];
+      for(var k=0;k<mr.length;k++){
+        var q=mr[k],a=utcMs(q[0],q[1],q[2],2,0),b=utcMs(q[3],q[4],q[5],2,0);
+        if(ms>=a&&ms<b)return 0;
+      }
+      return base;
+    }else return base;
+
+    /* Southern-hemisphere rules cross New Year. */
+    var active=start<end?(ms>=start&&ms<end):(ms>=start||ms<end);
+    return base+(active?60:0);
+  }
+
+  function displayParts(ms){
+    if(TIMESOURCE===1&&LOCMODE===0&&isFinite(PLACETZ))
+      return utcParts(ms+placeOffset(ms)*60000);
+    return localParts(ms);
+  }
+
   function layoutBodies(){
     /* Place the Moon envelope tangent to the left and bottom screen edges. */
     var env=MOONORBIT+MOONR;
@@ -150,26 +313,25 @@
     SUNY=24+sunOuter;
   }
 
-  function dayOfYear(d){
+  function dayOfYearUTC(p){
     var md=[0,31,59,90,120,151,181,212,243,273,304,334];
-    var n=md[d.getMonth()]+d.getDate();
-    var y=d.getFullYear();
-    if(d.getMonth()>1 && ((y%4===0 && y%100!==0)||y%400===0))n++;
+    var n=md[p.m-1]+p.d;
+    if(p.m>2&&((p.y%4===0&&p.y%100!==0)||p.y%400===0))n++;
     return n;
   }
 
-  function solarPosition(d,lat,lon){
-    var n=dayOfYear(d);
-    var hour=d.getHours()+d.getMinutes()/60+d.getSeconds()/3600;
+  function solarPosition(ms,lat,lon){
+    var p=utcParts(ms);
+    var n=dayOfYearUTC(p);
+    var hour=p.h+p.mi/60+p.s/3600;
     var g0=2*Math.PI/365*(n-1+(hour-12)/24);
     var eq=229.18*(0.000075+0.001868*Math.cos(g0)-0.032077*Math.sin(g0)
       -0.014615*Math.cos(2*g0)-0.040849*Math.sin(2*g0));
     var dec=0.006918-0.399912*Math.cos(g0)+0.070257*Math.sin(g0)
       -0.006758*Math.cos(2*g0)+0.000907*Math.sin(2*g0)
       -0.002697*Math.cos(3*g0)+0.00148*Math.sin(3*g0);
-    var tz=0;
-    try{tz=-d.getTimezoneOffset()/60;}catch(e){}
-    var tst=hour*60+eq+4*lon-60*tz;
+    /* UTC solar time: no Bangle timezone or DST enters this path. */
+    var tst=hour*60+eq+4*lon;
     while(tst<0)tst+=1440;
     while(tst>=1440)tst-=1440;
     var ha=rad(tst/4-180),la=rad(lat);
@@ -184,7 +346,7 @@
   }
 
   function safeSolar(){
-    try{return solarPosition(virtualDate(),TESTLAT,TESTLON);}
+    try{return solarPosition(virtualNowMs(),TESTLAT,TESTLON);}
     catch(e){return {az:0,el:-99,ha:0,dec:0};}
   }
 
@@ -323,83 +485,105 @@
     }
   }
 
-  function drawBoldSpaced(str,x,y,advance,color){
-    var xx=x;
-    g.setBgColor(WHITE).setColor(color).setFont("12x20").setFontAlign(-1,-1);
-    for(var i=0;i<str.length;i++){
-      if(str[i]===" "){xx+=7;continue;}
-      g.drawString(str[i],xx,y);
-      g.drawString(str[i],xx+1,y);
-      xx+=advance;
+  function moonHitsRect(m,x,y,w,h){
+    if(!m)return false;
+    var nx=Math.max(x,Math.min(m.x,x+w)),ny=Math.max(y,Math.min(m.y,y+h));
+    var dx=m.x-nx,dy=m.y-ny,r=MOONR+2;
+    return dx*dx+dy*dy<=r*r;
+  }
+
+  function topFreeGap(){
+    var spans=[];
+    if(typeof WIDGETS!=="undefined")Object.keys(WIDGETS).forEach(function(k){
+      var wd=WIDGETS[k];
+      if(!wd||!wd.width||!wd.area||wd.area.charAt(0)!=="t")return;
+      if(typeof wd.x==="number")spans.push([wd.x,wd.x+wd.width-1]);
+    });
+    spans.sort(function(a,b){return a[0]-b[0];});
+    var p=0,gaps=[];
+    spans.forEach(function(s){if(s[0]>p)gaps.push([p,s[0]-1]);p=Math.max(p,s[1]+1);});
+    if(p<W)gaps.push([p,W-1]);
+    if(!gaps.length)return;
+    gaps.sort(function(a,b){return (b[1]-b[0])-(a[1]-a[0]);});
+    return gaps[0];
+  }
+
+  function drawHeaderClock(){
+    if(killed||mode!=="tenkyu"||(DATEPOS!==0&&TIMEPOS!==0))return;
+    if(TIMEPOS===0)TIMEBOX=undefined;
+    var gap=topFreeGap();if(!gap)return;
+    var d=displayParts(virtualNowMs()),date=pad(d.m)+pad(d.d),time=pad(d.h)+pad(d.mi);
+    var size=20,showDate=DATEPOS===0,showTime=TIMEPOS===0,space=(showDate&&showTime)?" ":"";
+    var txt=(showDate?date:"")+space+(showTime?time:"");
+    var maxW=Math.max(1,gap[1]-gap[0]-2);
+    g.setFont("Vector",size);
+    while(size>8&&g.stringWidth(txt)>maxW){size--;g.setFont("Vector",size);}
+    var x=gap[0]+1,y=Math.max(0,Math.floor((24-size)/2));
+    var bg=g.theme.bg,fg=g.theme.fg;
+    g.setColor(bg).fillRect(gap[0],0,gap[1],23);
+    g.setBgColor(bg).setFont("Vector",size).setFontAlign(-1,-1);
+    if(showDate){g.setColor(fg).drawString(date,x,y);x+=g.stringWidth(date+space);}
+    if(showTime){
+      TIMEBOX={x:x,y:0,w:gap[1]-x+1,h:24,size:size,tx:x,ty:y,align:-1};
+      drawTimeOnly();
     }
-    return xx;
   }
 
-  function isCharging(){
-    try{return !!Bangle.isCharging();}catch(e){return false;}
-  }
-
-  function drawBattery(show){
-    var bat=E.getBattery(),txt=""+bat;
-    g.setColor(WHITE).fillRect(BATLEFT,0,W-1,23);
-    if(!show)return;
-    g.setBgColor(WHITE)
-      .setColor(bat<=20?RED:GREEN)
-      .setFont("12x20")
-      .setFontAlign(1,-1);
-    g.drawString(txt,W-1,2);
-    g.drawString(txt,W-2,2);
-  }
-
-  function drawHeader(){
-    var d=virtualDate();
-    var pre=pad(d.getMonth()+1)+"/"+pad(d.getDate())+" "+pad(d.getHours());
-    var post=pad(d.getMinutes());
-    var x=1,adv=13;
-
-    g.setColor(WHITE).fillRect(0,0,W-1,23);
-
-    x=drawBoldSpaced(pre,x,2,adv,BLACK);
-    colonX=x;
-    colonVisible=(d.getSeconds()%2)===0;
-    if(colonVisible){
-      g.setBgColor(WHITE).setColor(BLACK).setFont("12x20").setFontAlign(-1,-1);
-      g.drawString(":",colonX,2);
-      g.drawString(":",colonX+1,2);
+  function screenGroup(pos,m){
+    var hasDate=DATEPOS===pos,hasTime=TIMEPOS===pos;
+    if(!hasDate&&!hasTime)return;
+    var d=displayParts(virtualNowMs()),date=pad(d.m)+pad(d.d);
+    g.setFont("Vector",DATESIZE);var dw=hasDate?g.stringWidth(date):0;
+    g.setFont("Vector",TIMESIZE);var tw=0;
+    if(hasTime)for(var digit=0;digit<10;digit++)tw=Math.max(tw,g.stringWidth(""+digit)*4);
+    var w=Math.max(dw,tw),h=(hasDate?DATESIZE+1:0)+(hasDate&&hasTime?2:0)+(hasTime?TIMESIZE+1:0);
+    var right=pos===2,x=right?W-2-w:2,y=pos===2?SUNY+SUNR+SUNRAY+3:25;
+    if(moonHitsRect(m,x,y,w,h)){
+      if(pos===1){
+        var nx=m.x+MOONR+4;
+        if(nx+w<=W-2)x=nx;else y=Math.min(H-h-2,m.y+MOONR+4);
+      }else y=Math.min(H-h-2,m.y+MOONR+4);
     }
-    x=colonX+adv;
-    drawBoldSpaced(post,x,2,adv,BLACK);
-
-    batteryCharging=isCharging();
-    drawBattery(!batteryCharging||colonVisible);
-  }
-
-  function drawColon(show){
-    if(killed||busy||mode!=="orbit")return;
-    g.setColor(WHITE).fillRect(colonX,2,colonX+12,21);
-    if(show){
-      g.setBgColor(WHITE).setColor(BLACK).setFont("12x20").setFontAlign(-1,-1);
-      g.drawString(":",colonX,2);
-      g.drawString(":",colonX+1,2);
+    g.setColor(BLACK).fillRect(x-1,y-1,x+w+1,y+h+1);
+    var yy=y;
+    if(hasDate){
+      g.setBgColor(BLACK).setColor(WHITE).setFont("Vector",DATESIZE).setFontAlign(right?1:-1,-1);
+      g.drawString(date,right?x+w:x,yy);yy+=DATESIZE+3;
     }
-    colonVisible=show;
-
-    var charging=isCharging();
-    if(charging)drawBattery(show);
-    else if(batteryCharging)drawBattery(true);
-    batteryCharging=charging;
+    if(hasTime){
+      TIMEBOX={x:x-1,y:yy-1,w:w+3,h:TIMESIZE+3,size:TIMESIZE,
+        tx:right?x+w:x,ty:yy,align:right?1:-1};
+      drawTimeOnly();
+    }
   }
 
-  function armSecond(){
-    clear(secondTimer);
-    secondTimer=setTimeout(function(){
-      secondTimer=undefined;
-      if(!killed&&mode==="orbit"){
-        var show=(new Date().getSeconds()%2)===0;
-        if(show!==colonVisible)drawColon(show);
-        armSecond();
-      }
-    },1000-(Date.now()%1000)+20);
+  function drawDateTime(m){
+    screenGroup(1,m);
+    screenGroup(2,m);
+  }
+
+  function drawTimeOnly(){
+    if(killed||mode!=="tenkyu"||!TIMEBOX)return;
+    var b=TIMEBOX,d=displayParts(virtualNowMs());
+    g.setColor(WHITE).fillRect(b.x,b.y,b.x+b.w-1,b.y+b.h-1);
+    g.setBgColor(WHITE).setColor(BLACK).setFont("Vector",b.size).setFontAlign(b.align,-1);
+    g.drawString(pad(d.h)+pad(d.mi),b.tx,b.ty);
+  }
+
+  function installWidgetRedrawHook(){
+    if(widgetDrawWrapper||typeof Bangle.drawWidgets!=="function")return;
+    nativeDrawWidgets=Bangle.drawWidgets;
+    widgetDrawWrapper=function(){
+      var r=nativeDrawWidgets.apply(Bangle,arguments);
+      drawHeaderClock();
+      return r;
+    };
+    Bangle.drawWidgets=widgetDrawWrapper;
+  }
+
+  function removeWidgetRedrawHook(){
+    if(widgetDrawWrapper&&Bangle.drawWidgets===widgetDrawWrapper)Bangle.drawWidgets=nativeDrawWidgets;
+    widgetDrawWrapper=undefined;nativeDrawWidgets=undefined;
   }
 
   function drawSun(){
@@ -555,9 +739,30 @@
     g.setColor(YELLOW).fillPoly(MOON_CACHE_LIT);
     g.setColor(BLACK).fillPoly(MOON_CACHE_FAR);
     g.setColor(WHITE).drawPoly(MOON_CACHE_NEAR,false);
+    // Global eclipse alert: accent the outer lunar rim, not the phase boundary.
+    if(eclipseActive)g.setColor(RED).drawCircle(m.x,m.y,MOONR);
     return m;
   }
 
+
+  function drawOrbitHours(sol){
+    if(!HOURENABLED)return;
+    /* A revolution is 24 hours. Anchor civil hours to the observer's
+       zenith line, including the selected time source and DST. */
+    var p=displayParts(virtualNowMs());
+    var hour=p.h+p.mi/60+p.s/3600,dir=VIEW_SOUTH?1:-1;
+    var base=SUNANG+dir*(sol.ha-hour*Math.PI/12);
+    var radius=MOONORBIT+7;
+    g.setBgColor(BLACK).setColor(WHITE).setFont("Vector",HOURSIZE).setFontAlign(0,0);
+    for(var h=0;h<24;h+=HOURSTEP){
+      var a=base+dir*h*Math.PI/12;
+      var x=Math.round(EARTHX+radius*Math.cos(a));
+      var y=Math.round(EARTHY+radius*Math.sin(a));
+      g.drawString(ROMAN[h%12],x,y,true);
+    }
+  }
+
+  var lastObserverDay;
   function drawObserver(sol){
     var sunAng=Math.atan2(SUNY-EARTHY,SUNX-EARTHX);
     var rr=EARTHR*Math.cos(rad(TESTLAT));
@@ -571,15 +776,14 @@
 
     /* Draw sunrise/sunset rays at +/-H0; omit them in polar day/night. */
     if(!rs.polar){
-      var plen=EARTHR+8;
       var ar=a-rs.h0,as=a+rs.h0;
       g.setColor(0xF81F);
-      g.drawLine(x,y,
-        Math.round(px+Math.cos(ar)*plen),
-        Math.round(py+Math.sin(ar)*plen));
-      g.drawLine(x,y,
-        Math.round(px+Math.cos(as)*plen),
-        Math.round(py+Math.sin(as)*plen));
+      g.drawLine(EARTHX,EARTHY,
+        Math.round(EARTHX+Math.cos(ar)*MOONORBIT),
+        Math.round(EARTHY+Math.sin(ar)*MOONORBIT));
+      g.drawLine(EARTHX,EARTHY,
+        Math.round(EARTHX+Math.cos(as)*MOONORBIT),
+        Math.round(EARTHY+Math.sin(as)*MOONORBIT));
     }
 
     /* Extend the zenith line into the lunar-orbit region. */
@@ -590,7 +794,8 @@
     /* Draw the 5 px-wide zenith line as one filled quadrilateral. */
     var hw=2;
     var qx=-uy*hw,qy=ux*hw;
-    g.setColor(0x07E0).fillPoly([
+    lastObserverDay=sol.el>=0;
+    g.setColor(lastObserverDay?0x07E0:YELLOW).fillPoly([
       Math.round(x+qx),Math.round(y+qy),
       Math.round(zx+qx),Math.round(zy+qy),
       Math.round(zx-qx),Math.round(zy-qy),
@@ -661,12 +866,15 @@
         if(pr&&pl)p=(rightSpace>=leftSpace)?pr:pl;
         else if(pr)p=pr;
         else if(pl)p=pl;
+        if(pl&&p===pl)p.left=true;
       }
-      g.setBgColor(BLACK).setColor(WHITE).setFontAlign(1,-1);
+      /* Align both lines to the screen edge on their selected side. */
+      var labelX=p.left?2:p.right;
+      g.setBgColor(BLACK).setColor(WHITE).setFontAlign(p.left?-1:1,-1);
       g.setFont("Vector",p.country.size);
-      g.drawString(p.country.text,p.right,p.yCountry);
+      g.drawString(p.country.text,labelX,p.yCountry);
       g.setFont("Vector",p.place.size);
-      g.drawString(p.place.text,p.right,p.yPlace);
+      g.drawString(p.place.text,labelX,p.yPlace);
       return;
     }
 
@@ -680,15 +888,79 @@
     }
   }
 
+  /* Load eclipse modules only when enabled; numeric lunar tables are lazy. */
+  function loadEclipseModule(name){
+    var source=Storage.read(name);
+    if(!source)throw new Error("Missing "+name);
+    var exports={};(new Function("exports",source))(exports);return exports;
+  }
+  function updateEclipse(){
+    if(!ECLIPSE_ENABLED)return false;
+    if(!eclipseDisplay){
+      var engine=loadEclipseModule("orbit.eclipse");
+      var renderer=loadEclipseModule("orbit.ecldraw");
+      eclipseDisplay=renderer.create(engine);
+      ECLIPSE_UPDATE_MS=renderer.UPDATE_MS;
+    }
+    var active=eclipseDisplay.update(new Date(virtualNowMs()));
+    nextEclipseCheck=Date.now()+(active?30000:300000);
+    return active;
+  }
+  function drawEclipse(sol){
+    if(!eclipseActive||!eclipseDisplay)return;
+    eclipseDisplay.draw(g,{radiusPx:EARTHR,cx:EARTHX,cy:EARTHY,
+      longitudeDeg:TESTLON,south:VIEW_SOUTH,
+      rotationRad:SUNANG+(VIEW_SOUTH?sol.ha:-sol.ha)});
+  }
+
+  function initRest(){
+    if(!REST_ENABLED)return;
+    restService=Bangle.orbitRest;
+    if(!restService){
+      var source=Storage.read("orbit.rest");
+      if(!source)return;
+      var exports={};(new Function("exports",source))(exports);
+      restService=exports.install(Bangle,Storage,E);
+    }
+    restService.configure(Storage.readJSON(CFGFILE,1)||{});
+  }
+  function restIsDayAt(ms){
+    var slot=Math.floor(ms/300000),index=slot%288;
+    if(restDaySlot[index]!==slot){
+      restDaySlot[index]=slot;
+      restDay[index]=solarPosition(ms,TESTLAT,TESTLON).el>=0?1:0;
+    }
+    return restDay[index]!==0;
+  }
+  function drawRest(sol){
+    // The ring is a real 24-hour recorder, not a future-date prediction.
+    if(!restService||selectedDayOffset!==0)return;
+    var now=Date.now();restService.sync(now);
+    restService.draw(g,{nowMs:now,radiusPx:MOONORBIT,
+      maxHeightPx:REST_MAX_HEIGHT,cx:EARTHX,cy:EARTHY,south:VIEW_SOUTH,
+      currentAngleRad:SUNANG+(VIEW_SOUTH?sol.ha:-sol.ha),
+      isDayAt:restIsDayAt});
+  }
+
   function drawBase(){
+    TIMEBOX=undefined;
+    eclipseActive=updateEclipse();
+    lastClockMinute=Math.floor(Date.now()/60000);
+    lastBaseBucket=Math.floor(Date.now()/300000);
     g.reset().setBgColor(BLACK).setColor(BLACK).clear();
     drawSun();
     var sol=safeSolar();
     drawEarth(sol);
-    drawObserver(sol);
+    drawEclipse(sol); // Earth's shadow first.
     var moon=drawMoon();
+    drawRest(sol); // Rest bars overwrite the Moon, as requested.
+    drawObserver(sol); // The red location point is still the topmost overlay.
+    /* Keep hour numerals visible over both sides of the Moon. */
+    drawOrbitHours(sol);
     drawLocationStatus(moon);
-    drawHeader();
+    drawDateTime(moon);
+    try{Bangle.drawWidgets();}catch(e){}
+    drawHeaderClock();
     try{g.flip();}catch(err){}
     busy=false;
   }
@@ -712,21 +984,46 @@
 
   function stopOrbitTimers(){
     clear(minuteTimer);minuteTimer=undefined;
-    clear(secondTimer);secondTimer=undefined;
     clear(idleTimer);idleTimer=undefined;
     clearTaps();
+  }
+  // Draw a minimal first frame *before* performing expensive navigation.
+  // g.flip makes the input acknowledgement visible even on the MiP LCD.
+  function showTransition(label){
+    try{
+      var w=g.getWidth(),h=g.getHeight();
+      g.reset().setBgColor(BLACK).setColor(BLACK).fillRect(0,24,w-1,h-1);
+      g.setColor(WHITE).setFont("6x8",2).setFontAlign(0,0)
+        .drawString(label,w>>1,(h+24)>>1);
+      try{g.flip();}catch(e){}
+    }catch(e){}
+  }
+  function queueTransition(label,run){
+    if(killed)return;
+    stopOrbitTimers();
+    clear(transitionTimer);transitionTimer=undefined;
+    mode="transition";interactive=false;
+    try{Bangle.setLocked(false);}catch(e){}
+    try{Bangle.setBacklight(true);}catch(e){}
+    showTransition(label);
+    // Yield one event loop before the new screen's heavy drawing starts.
+    transitionTimer=setTimeout(function(){
+      transitionTimer=undefined;
+      if(!killed&&mode==="transition")run();
+    },0);
   }
 
   function armIdle(){
     clear(idleTimer);
-    if(mode!=="orbit"||!interactive)return;
-    idleTimer=setTimeout(goIdle,8000);
+    if(mode!=="tenkyu"||!interactive)return;
+    if(VIEWLIGHT_MS>0)idleTimer=setTimeout(goIdle,VIEWLIGHT_MS);
   }
 
   function startInteraction(){
-    if(killed||mode!=="orbit")return;
+    if(killed||mode!=="tenkyu")return;
     interactive=true;
     try{Bangle.setLocked(false);}catch(e){}
+    try{if(!Bangle.isLCDOn())Bangle.setLCDPower(1);}catch(e){}
     try{Bangle.setBacklight(true);}catch(e){}
     armIdle();
   }
@@ -735,25 +1032,27 @@
     clear(idleTimer);idleTimer=undefined;
     clearTaps();
     interactive=false;
+    /* Bangle.js 2 uses a memory-in-pixel LCD which is normally left powered.
+       Only switch the backlight off here. Forcing LCD power off bypasses the
+       normal Q3 wake path because lcdPowerTimeout is intentionally zero. */
     try{Bangle.setBacklight(false);}catch(e){}
-    try{Bangle.setLocked(false);}catch(e){}
+    try{Bangle.setLocked(true);}catch(e){} // Keep LCD on, disable power-hungry touch.
   }
 
   function startOrbit(keepInteractive){
     if(killed)return;
     if(calendar&&calendar.isActive())calendar.stop();
-    mode="orbit";
+    mode="tenkyu";
     busy=false;
     drawBase();
     armMinute();
-    armSecond();
     interactive=!!keepInteractive;
     if(interactive){
       try{Bangle.setLocked(false);}catch(e){}
       try{Bangle.setBacklight(true);}catch(e){}
       armIdle();
     }else{
-      try{Bangle.setLocked(false);}catch(e){}
+      try{Bangle.setLocked(true);}catch(e){}
     }
   }
 
@@ -770,61 +1069,46 @@
 
 
   function openCalendar(){
-    if(killed||mode!=="orbit")return;
-    stopOrbitTimers();
-    mode="calendar";
-    interactive=false;
-    try{Bangle.setLocked(false);}catch(e){}
-    try{Bangle.setBacklight(true);}catch(e){}
-
-    if(!calendar){
-      startOrbit(true);
-      return;
-    }
-
-    var focus=hasSelectedDate?virtualDate():new Date();
-    try{
-      calendar.start({
-        focusDate:focus,
-        selectedDate:hasSelectedDate?focus:undefined,
-        onSelect:function(d,offset){
-          if(killed)return;
-          if(!d){
-            setDateFromCalendar(undefined);
-            return;
+    if(killed||mode!=="tenkyu")return;
+    queueTransition("Calendar...",function(){
+      mode="calendar";
+      if(!calendar){startOrbit(true);return;}
+      var focus=hasSelectedDate?virtualDate():new Date();
+      try{
+        calendar.start({
+          focusDate:focus,
+          selectedDate:hasSelectedDate?focus:undefined,
+          onSelect:function(d,offset){
+            if(killed)return;
+            if(!d){setDateFromCalendar(undefined);return;}
+            if(typeof offset==="number"&&isFinite(offset)){
+              selectedDayOffset=offset|0;
+              hasSelectedDate=true;
+              MOON_CACHE_BUCKET=-1;
+            }else setDateFromCalendar(d);
+          },
+          onReturn:function(d){
+            if(killed)return;
+            setDateFromCalendar(d);
+            queueTransition("Orbit...",function(){startOrbit(true);});
           }
-          if(typeof offset==="number"&&isFinite(offset)){
-            selectedDayOffset=offset|0;
-            hasSelectedDate=true;
-            MOON_CACHE_BUCKET=-1;
-          }else setDateFromCalendar(d);
-        },
-        onReturn:function(d){
-          if(killed)return;
-          setDateFromCalendar(d);
-          startOrbit(true);
-        }
-      });
-    }catch(e){
-      mode="orbit";
-      busy=false;
-      startOrbit(true);
-    }
+        });
+      }catch(e){startOrbit(true);}
+    });
   }
 
   function openSettings(){
-    if(killed||mode!=="orbit")return;
-    stopOrbitTimers();
-    var src=Storage.read("orbit.settings.js");
-    if(!src){startOrbit(true);return;}
-    cleanup();
-    try{
-      var fn=eval(src);
-      if(typeof fn==="function")fn(function(){load("orbit.app.js");});
-      else load("orbit.app.js");
-    }catch(e){
-      load("orbit.app.js");
-    }
+    if(killed||mode!=="tenkyu")return;
+    queueTransition("Settings...",function(){
+      var src=Storage.read("orbit.settings.js");
+      if(!src){startOrbit(true);return;}
+      cleanup();
+      try{
+        var fn=eval(src);
+        if(typeof fn==="function")fn(function(){load("orbit.app.js");});
+        else load("orbit.app.js");
+      }catch(e){load("orbit.app.js");}
+    });
   }
 
   function onTouch(button,xy){
@@ -833,15 +1117,17 @@
       if(calendar)calendar.touch(xy);
       return;
     }
-    if(mode!=="orbit"||busy)return;
+    if(mode!=="tenkyu"||busy)return;
     try{if(!Bangle.isLCDOn())return;}catch(e){}
 
     tapCount++;
     if(tapCount===1){
+      // The 400ms single/double-tap disambiguation now has an immediate cue.
+      try{g.setColor(YELLOW).fillCircle(8,g.getHeight()-8,3);g.flip();}catch(e){}
       clear(tapTimer);
       tapTimer=setTimeout(function(){
         tapTimer=undefined;
-        if(killed||mode!=="orbit")return;
+        if(killed||mode!=="tenkyu")return;
         tapCount=0;
         openCalendar();
       },400);
@@ -859,18 +1145,24 @@
   }
 
   function onFaceUp(up){
-    if(up&&mode==="orbit")startInteraction();
+    if(up&&mode==="tenkyu")startInteraction();
+  }
+
+  function onTwist(){
+    if(mode==="tenkyu")startInteraction();
   }
 
   function onLCD(on){
     if(!on){
+      try{Bangle.setLocked(true);}catch(e){}
+      clear(minuteTimer);minuteTimer=undefined;
+      clear(transitionTimer);transitionTimer=undefined;
       clearTaps();
       clear(idleTimer);idleTimer=undefined;
       interactive=false;
-      try{Bangle.setLocked(false);}catch(e){}
 
       if(mode==="calendar"&&calendar)calendar.stop();
-      if(mode!=="orbit"){
+      if(mode!=="tenkyu"){
         /* Preserve the selected calendar date across LCD power cycles. */
         resetOnWake=true;
       }
@@ -879,43 +1171,66 @@
 
     if(resetOnWake){
       resetOnWake=false;
-      startOrbit(false);
+      queueTransition("Orbit...",function(){startOrbit(true);});
+      return;
+    }
+    if(mode==="tenkyu"){
+      interactive=true;
+      try{Bangle.setLocked(false);}catch(e){}
+      try{Bangle.setBacklight(true);}catch(e){}
+      // Existing clock drawing may be expensive after LCD power restoration.
+      queueTransition("Orbit...",function(){
+        mode="tenkyu";interactive=true;drawBase();armMinute();armIdle();
+      });
     }
   }
 
-  function onLock(isLocked){
-    if(!isLocked||killed)return;
-    clear(unlockTimer);
-    unlockTimer=setTimeout(function(){
-      unlockTimer=undefined;
-      if(!killed)try{Bangle.setLocked(false);}catch(e){}
-    },0);
-  }
-
   function onButton(){
-    if(killed)return;
-    cleanup();
-    Bangle.showLauncher();
+    if(killed||mode==="transition")return;
+    queueTransition("Launcher...",function(){
+      cleanup();
+      Bangle.showLauncher();
+    });
   }
 
   function armMinute(){
     clear(minuteTimer);
+    // Normal minute clock updates are cheap. Eclipse ephemerides normally run
+    // every 5 minutes, and switch to 30-second tracking only during eclipses.
+    var tick=ECLIPSE_ENABLED&&eclipseActive?ECLIPSE_UPDATE_MS:60000;
     minuteTimer=setTimeout(function(){
       minuteTimer=undefined;
-      if(!killed&&mode==="orbit"){drawBase();armMinute();}
-    },60000-(Date.now()%60000)+25);
+      if(!killed&&mode==="tenkyu"){
+        var wasActive=eclipseActive;
+        if(ECLIPSE_ENABLED&&Date.now()>=nextEclipseCheck)eclipseActive=updateEclipse();
+        /* Rebuild Earth when shadow moves/disappears: no accumulated black trail.
+           Far from eclipse, keep the original five-minute base refresh. */
+        if(wasActive||eclipseActive||Math.floor(Date.now()/300000)!==lastBaseBucket||
+           (safeSolar().el>=0)!==lastObserverDay)drawBase();
+        else if(Math.floor(Date.now()/60000)!==lastClockMinute){
+          lastClockMinute=Math.floor(Date.now()/60000);
+          drawTimeOnly();try{g.flip();}catch(e){}
+        }
+        armMinute();
+      }
+    },tick-(Date.now()%tick)+25);
   }
 
   function cleanup(){
     if(killed)return;
     killed=true;
+    clear(transitionTimer);transitionTimer=undefined;
     stopOrbitTimers();
-    clear(unlockTimer);unlockTimer=undefined;
+    if(eclipseDisplay)eclipseDisplay.reset();
+    // The boot-owned recorder keeps running in menus and other apps.
+    restService=undefined;
+    eclipseDisplay=undefined;
     if(calendar)calendar.stop();
+    removeWidgetRedrawHook();
     try{Bangle.setUI();}catch(e){}
     try{Bangle.removeListener("faceUp",onFaceUp);}catch(e){}
+    try{Bangle.removeListener("twist",onTwist);}catch(e){}
     try{Bangle.removeListener("lcdPower",onLCD);}catch(e){}
-    try{Bangle.removeListener("lock",onLock);}catch(e){}
     try{E.removeListener("kill",cleanup);}catch(e){}
   }
 
@@ -924,16 +1239,19 @@
   buildLightingCache();
   buildEarthMapCache();
   buildMoonCache();
-  try{Bangle.setUI({mode:"custom",touch:onTouch,swipe:onSwipe,btn:onButton});}catch(e){}
+  initRest();
+  try{Bangle.setUI({mode:"custom",clock:1,touch:onTouch,swipe:onSwipe,btn:onButton});}catch(e){}
   /* Load widgets only after setUI, as required for clock/widget state tracking. */
   try{if(typeof WIDGETS==="undefined")Bangle.loadWidgets();}catch(e){}
+  installWidgetRedrawHook();
   Bangle.on("faceUp",onFaceUp);
+  Bangle.on("twist",onTwist);
   Bangle.on("lcdPower",onLCD);
-  Bangle.on("lock",onLock);
   E.on("kill",cleanup);
-  try{Bangle.setBacklight(false);}catch(e){}
   try{Bangle.setLocked(false);}catch(e){}
   drawBase();
   armMinute();
-  armSecond();
+  armIdle(); // Also enforce a finite timeout when the system timeout is zero.
 })();
+
+

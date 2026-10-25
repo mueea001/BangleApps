@@ -1,6 +1,14 @@
-/* orbit 0.04 stable: settings and editable event data. */
+/* tenkyu 0.06: settings and editable event data. */
 (function(back){
   var Storage=require("Storage");
+  var REST_THRESHOLDS=[0.001,0.003,0.009,0.027,0.081,0.243,0.729];
+  function thresholdIndex(v){
+    if(!isFinite(v)||v<=0)return 3;
+    var best=0;
+    for(var i=1;i<7;i++)if(Math.abs(Math.log(v/REST_THRESHOLDS[i]))<Math.abs(Math.log(v/REST_THRESHOLDS[best])))best=i;
+    return best;
+  }
+
   var C,P,JPI;
   var JPFILE="orbitjp.dat",jpPrefCache=-1,jpMunicipalities;
   var CFG="orbit.json",CAL="orbit.cal.json",EVENTS="orbit.events.json";
@@ -30,8 +38,11 @@
     releaseMunicipalities();
     C=undefined;P=undefined;JPI=undefined;
     try{
-      if(typeof Modules!=="undefined"&&Modules.getCached&&
-         Modules.getCached().includes("orbitloc"))Modules.removeCached("orbitloc");
+      if(typeof Modules!=="undefined"&&Modules.getCached){
+        var mc=Modules.getCached();
+        if(mc.includes("orbitloc"))Modules.removeCached("orbitloc");
+        if(mc.includes("orbittz"))Modules.removeCached("orbittz");
+      }
     }catch(e){}
   }
   function countryIndex(name){
@@ -61,13 +72,45 @@
     var s=readJSON(CFG,{}),changed=false;
     function set(k,v){if(s[k]!==v){s[k]=v;changed=true;}}
 
+    /* Default to the Chiyoda ward office without loading place tables.
+       Preserve any previously selected place, manual coordinates or GPS fix. */
+    if(s.locationSource===undefined&&s.locationMode===undefined&&
+       !s.locName&&!s.locPref&&s.manualLat===undefined&&s.manualLon===undefined&&
+       s.lat===undefined&&s.lon===undefined&&s.countryName===undefined&&
+       s.pref===undefined&&s.municipality===undefined&&s.place===undefined){
+      set("locationSource","place");set("locationMode",0);
+      set("countryName","Japan");set("locPref","Tokyo");set("locName","Chiyoda-ku");
+      set("pref",12);set("municipality",0);set("place",0);set("placeStateVersion",1);
+      set("manualLat",35.694);set("manualLon",139.7536);
+      set("tzBase",540);set("tzRule",0);
+    }
+
+
     if(!isFinite(s.sunSize))s.sunSize=8;
     if(!isFinite(s.earthSize))s.earthSize=42;
     if(!isFinite(s.moonSize))s.moonSize=15;
     if(!isFinite(s.moonOrbit))s.moonOrbit=62;
+    if(!isFinite(s.datePos))set("datePos",2);if(!isFinite(s.timePos))set("timePos",0);
+    if(!isFinite(s.dateSize))s.dateSize=22;if(!isFinite(s.timeSize))s.timeSize=22;
+    set("eclipseEnabled",s.eclipseEnabled===undefined?true:s.eclipseEnabled!==false);
+    set("restEnabled",s.restEnabled!==false);
+    set("restBarHeight",Math.max(1,Math.min(14,isFinite(s.restBarHeight)?s.restBarHeight|0:10)));
+    set("restThreshold",REST_THRESHOLDS[thresholdIndex(s.restThreshold)]);
+    set("restWearEnabled",s.restWearEnabled!==false);
+    set("restWearThreshold",REST_THRESHOLDS[thresholdIndex(s.restWearThreshold===undefined?0.009:s.restWearThreshold)]);
+    [["restProbeSeconds",10,60,30],
+      ["restPulseConfidence",1,100,90],["restPulseMin",20,100,40],["restPulseMax",120,240,200]].forEach(function(q){
+      set(q[0],Math.max(q[1],Math.min(q[2],isFinite(s[q[0]])?+s[q[0]]:q[3])));
+    });
+    set("timeSource",(s.timeSource===1||s.timeSource==="1")?1:0);
+    set("orbitHourSize",Math.max(6,Math.min(12,isFinite(s.orbitHourSize)?s.orbitHourSize|0:8)));
+    set("orbitHourStep",[1,2,3,6].indexOf(s.orbitHourStep)>=0?s.orbitHourStep:1);
+    set("orbitHourEnabled",s.orbitHourEnabled===undefined?false:s.orbitHourEnabled!==false);
     s.sunSize=Math.max(6,Math.min(15,s.sunSize|0));
     s.earthSize=Math.max(40,Math.min(45,s.earthSize|0));
     s.moonSize=Math.max(14,Math.min(16,s.moonSize|0));
+    s.datePos=Math.max(0,Math.min(2,s.datePos|0));s.timePos=Math.max(0,Math.min(2,s.timePos|0));
+    s.dateSize=Math.max(12,Math.min(30,s.dateSize|0));s.timeSize=Math.max(12,Math.min(30,s.timeSize|0));
     var minOrbit=s.earthSize+s.moonSize+4;
     s.moonOrbit=Math.max(minOrbit,Math.min(70,s.moonOrbit|0));
     s.layoutVersion=2;
@@ -86,7 +129,13 @@
     if(s.lat!==undefined){delete s.lat;changed=true;}
     if(s.lon!==undefined){delete s.lon;changed=true;}
 
-    if(s.locationMode<0||s.locationMode>2||s.locationMode===undefined)s.locationMode=1;
+    if(s.locName==="GPS"||s.locPref==="GPS")set("locationSource","gps");
+    else if(s.locName==="Custom"||s.locPref==="Manual")set("locationSource","manual");
+    else if(s.locName||s.locPref)set("locationSource","place");
+    else if(s.locationSource!=="place"&&s.locationSource!=="manual"&&s.locationSource!=="gps")
+      set("locationSource",(s.locationMode===0||s.locationMode==="0")?"place":
+        ((s.locationMode===2||s.locationMode==="2")?"gps":"manual"));
+    set("locationMode",s.locationSource==="place"?0:(s.locationSource==="gps"?2:1));
     if(s.viewSide!==0&&s.viewSide!==1)s.viewSide=0;
     if(!s.countryName)s.countryName="Japan";
     if(!isFinite(s.pref))s.pref=12;
@@ -154,27 +203,45 @@
     var ci=countryIndex(s.countryName);
     if(s.countryName==="Japan"){
       var jl=loadMunicipalities(s.pref);
-      return {group:P[s.pref][0],place:jl[s.municipality]};
+      return {group:P[s.pref][0],place:jl[s.municipality],ci:ci,pi:0};
     }
     var list=C[ci][1]||[];
-    return {group:C[ci][0],place:list[s.place]};
+    return {group:C[ci][0],place:list[s.place],ci:ci,pi:s.place|0};
   }
-  function commitPlace(s){
+  function placeTimeData(q){
+    var t;
+    try{
+      var z=require("orbittz");
+      t=z.get(q.ci,q.pi);
+      z=undefined;
+    }catch(e){t=undefined;}
+    return t;
+  }
+  function saveSelectedPlace(s){
     var q=selectedPlace(s),p=q.place;
     if(!p)return;
-    s.locationMode=0;s.locPref=q.group;s.locName=p[0];
+    s.locationSource="place";s.locationMode=0;
+    s.locPref=q.group;s.locName=p[0];
     s.manualLat=p[1];s.manualLon=p[2];
+    var t=placeTimeData(q);
+    if(t&&isFinite(t[0])){s.tzBase=+t[0];s.tzRule=t[1]|0;}
     write(CFG,s);
-    var msg=q.group+" / "+p[0]+"\nLat "+Number(s.manualLat).toFixed(3)+"\nLon "+Number(s.manualLon).toFixed(3);
+    return q;
+  }
+  function commitPlace(s){
+    var q=saveSelectedPlace(s),p=q&&q.place;
+    if(!p)return;
+    var tz=isFinite(s.tzBase)?((s.tzBase>=0?"+":"")+((s.tzBase/60).toFixed(s.tzBase%60?2:0))):"--";
+    var msg=q.group+" / "+p[0]+"\nLat "+Number(s.manualLat).toFixed(3)+"\nLon "+Number(s.manualLon).toFixed(3)+"\nUTC "+tz+(s.tzRule?" + DST":"");
     releasePlaceData();
     E.showAlert(msg,"Location saved").then(main);
   }
   function applyManual(s){
-    s.locationMode=1;s.locPref="Manual";s.locName="Custom";
+    s.locationSource="manual";s.locationMode=1;s.locPref="Manual";s.locName="Custom";
     write(CFG,s);
   }
   function applyGPS(s,fix){
-    s.locationMode=2;s.locPref="GPS";s.locName="GPS";
+    s.locationSource="gps";s.locationMode=2;s.locPref="GPS";s.locName="GPS";
     s.manualLat=Math.max(-90,Math.min(90,+fix.lat));
     s.manualLon=Math.max(-180,Math.min(180,+fix.lon));
     write(CFG,s);
@@ -230,7 +297,7 @@
       if(fix.fix&&isFinite(fix.lat)&&isFinite(fix.lon)){
         applyGPS(s,fix);stopGPS();
         try{Bangle.buzz(300);}catch(e){}
-        E.showAlert("GPS location saved\n"+gpsLocationText(s),"orbit GPS").then(main);
+        E.showAlert("GPS location saved\n"+gpsLocationText(s),"tenkyu GPS").then(main);
         return;
       }
       showGPSProgress(s,false);
@@ -239,7 +306,7 @@
     try{Bangle.setGPSPower(1,GPS_ID);}
     catch(e){
       stopGPS();
-      E.showAlert("Could not start GPS","orbit GPS").then(function(){gpsMenu(s);});
+      E.showAlert("Could not start GPS","tenkyu GPS").then(function(){gpsMenu(s);});
       return;
     }
     showGPSProgress(s,true);
@@ -248,7 +315,7 @@
     var prefix=s.locationMode===0?(s.locPref||"Place"):(s.locationMode===2?"GPS":"Manual");
     E.showAlert(prefix+" / "+(s.locName||"")+
       "\nLat "+Number(s.manualLat).toFixed(3)+
-      "\nLon "+Number(s.manualLon).toFixed(3),"orbit location")
+      "\nLon "+Number(s.manualLon).toFixed(3),"tenkyu location")
       .then(next||function(){locationMenu(s);});
   }
 
@@ -279,7 +346,7 @@
       s.municipality=Math.max(0,Math.min(ml.length-1,s.municipality|0));
       m["Municipality"]={value:s.municipality,min:0,max:ml.length-1,step:1,
         format:function(v){return ml[v][0];},
-        onchange:function(v){s.municipality=v;}
+        onchange:function(v){s.municipality=v;saveSelectedPlace(s);}
       };
     }else{
       var list=C[ci][1]||[];
@@ -287,7 +354,7 @@
         s.place=Math.max(0,Math.min(list.length-1,s.place|0));
         m["City"]={value:s.place,min:0,max:list.length-1,step:1,
           format:function(v){return list[v][0];},
-          onchange:function(v){s.place=v;}
+          onchange:function(v){s.place=v;saveSelectedPlace(s);}
         };
       }else{
         s.place=0;
@@ -341,22 +408,22 @@
   // ---------- Holiday cache ----------
   function cacheInfo(){
     var out={jp:0,ew:0,sc:0,ni:0,total:0};
-    Storage.list(/^orh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/).forEach(function(f){
-      var m=/^orh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/.exec(f);
+    Storage.list(/^orbh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/).forEach(function(f){
+      var m=/^orbh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/.exec(f);
       if(m){out[m[1]]++;out.total++;}
     });
     return out;
   }
   function clearCache(region,cb){
     var n=0;
-    Storage.list(/^orh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/).forEach(function(f){
-      var m=/^orh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/.exec(f);
+    Storage.list(/^orbh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/).forEach(function(f){
+      var m=/^orbh[0-9]+(jp|ew|sc|ni)[0-9][0-9][0-9][0-9]$/.exec(f);
       if(m&&(!region||m[1]===region)){Storage.erase(f);n++;}
     });
     E.showAlert("Deleted "+n,"Holiday cache").then(cb);
   }
   function cacheMenu(){
-    var n=cacheInfo(),m={"":{title:"Holiday cache"},"< Back":main};
+    var n=cacheInfo(),m={"":{title:"Holiday cache"},"< Back":calendarMenu};
     [["jp","Japan",n.jp],["ew","England/Wales",n.ew],["sc","Scotland",n.sc],["ni","N. Ireland",n.ni]].forEach(function(x){
       m[x[1]+" ("+x[2]+")"]=function(){E.showPrompt("Delete "+x[1]+" cache?").then(function(ok){if(ok)clearCache(x[0],cacheMenu);else cacheMenu();});};
     });
@@ -426,7 +493,7 @@
     doc.events.push(e);write(EVENTS,doc);editEvent(doc.events.length-1);
   }
   function eventsMenu(){
-    var doc=eventDoc(),m={"":{title:"Events"},"< Back":main,
+    var doc=eventDoc(),m={"":{title:"Events"},"< Back":calendarMenu,
       "Add anniversary":function(){addEvent("family");},
       "Add holiday":function(){addEvent("holiday");}
     };
@@ -436,26 +503,57 @@
     E.showMenu(m);
   }
 
-  function leave(){
-    stopGPS();releasePlaceData();
-    try{E.removeListener("kill",onKill);}catch(e){}
-    back();
+  function showExitFrame(){
+    // First-frame acknowledgement before reloading the large orbit clock.
+    try{
+      var w=g.getWidth(),h=g.getHeight();
+      g.reset().setBgColor(0).setColor(0).fillRect(0,24,w-1,h-1);
+      g.setColor(0xFFFF).setFont("6x8",2).setFontAlign(0,0)
+        .drawString("Orbit...",w>>1,(h+24)>>1);
+      try{g.flip();}catch(e){}
+    }catch(e){}
   }
-  function exitToOrbit(){
+  function exitWithFrame(continuation){
     stopGPS();releasePlaceData();
     try{E.removeListener("kill",onKill);}catch(e){}
-    load("orbit.app.js");
+    showExitFrame();
+    setTimeout(continuation,0);
+  }
+  function leave(){exitWithFrame(back);}
+  function exitToOrbit(){
+    exitWithFrame(function(){load("orbit.app.js");});
   }
   function onKill(){stopGPS();releasePlaceData();}
 
-  function main(){
-    stopGPS();releasePlaceData();
-    var s=appCfg(),c=calCfg();
+  function dialMenu(s){
+    E.showMenu({"":{title:"Dial"},"< Back":main,
+      "Enabled":{value:s.orbitHourEnabled,onchange:function(v){s.orbitHourEnabled=!!v;write(CFG,s);}},
+      "Hour size":{value:s.orbitHourSize,min:6,max:12,step:1,onchange:function(v){s.orbitHourSize=v;write(CFG,s);}},
+      "Hour step":{value:[1,2,3,6].indexOf(s.orbitHourStep),min:0,max:3,step:1,
+        format:function(v){return [1,2,3,6][v]+" h";},
+        onchange:function(v){s.orbitHourStep=[1,2,3,6][v];write(CFG,s);}
+      }
+    });
+  }
+
+  function dateTimeMenu(s){
+    E.showMenu({"":{title:"Date/time"},"< Back":main,
+      "Exit to tenkyu":exitToOrbit,
+      "Time source":{value:s.timeSource,min:0,max:1,step:1,
+        format:function(v){return v?"Place":"Bangle";},
+        onchange:function(v){
+          s.timeSource=v?1:0;
+          if(s.timeSource===1&&s.locationSource==="place"&&!isFinite(s.tzBase))saveSelectedPlace(s);
+          write(CFG,s);releasePlaceData();
+        }
+      }
+    });
+  }
+
+  function bodiesMenu(s){
     var minOrbit=s.earthSize+s.moonSize+4;
     if(s.moonOrbit<minOrbit){s.moonOrbit=minOrbit;write(CFG,s);}
-    var m={"":{title:"orbit"},"< Back":leave,
-      "Exit to orbit":exitToOrbit,
-      "Location":locationMenu,
+    E.showMenu({"":{title:"Bodies"},"< Back":main,
       "View side":{value:s.viewSide,min:0,max:1,step:1,
         format:function(v){return v?"South":"North";},
         onchange:function(v){s.viewSide=v?1:0;write(CFG,s);}
@@ -463,19 +561,109 @@
       "Sun size":{value:s.sunSize,min:6,max:15,step:1,onchange:function(v){s.sunSize=v;write(CFG,s);}},
       "Earth size":{value:s.earthSize,min:40,max:45,step:1,onchange:function(v){
         s.earthSize=v;var mn=s.earthSize+s.moonSize+4;if(s.moonOrbit<mn)s.moonOrbit=mn;
-        write(CFG,s);setTimeout(main,10);
+        write(CFG,s);setTimeout(function(){bodiesMenu(s);},10);
       }},
       "Moon size":{value:s.moonSize,min:14,max:16,step:1,onchange:function(v){
         s.moonSize=v;var mn=s.earthSize+s.moonSize+4;if(s.moonOrbit<mn)s.moonOrbit=mn;
-        write(CFG,s);setTimeout(main,10);
+        write(CFG,s);setTimeout(function(){bodiesMenu(s);},10);
       }},
-      "Moon orbit":{value:s.moonOrbit,min:minOrbit,max:70,step:1,onchange:function(v){s.moonOrbit=v;write(CFG,s);}},
+      "Moon orbit":{value:s.moonOrbit,min:minOrbit,max:70,step:1,onchange:function(v){s.moonOrbit=v;write(CFG,s);}}
+    });
+  }
+
+  function eclipseMenu(s){
+    E.showMenu({"":{title:"Solar eclipse"},"< Back":main,
+      "Enabled":{value:s.eclipseEnabled,format:function(v){return v?"On":"Off";},
+        onchange:function(v){s.eclipseEnabled=v;write(CFG,s);}}
+    });
+  }
+
+  function applyRest(s){
+    write(CFG,s);
+    if(!Bangle.orbitRest&&s.restEnabled){
+      var source=Storage.read("orbit.rest");
+      if(source){var exports={};(new Function("exports",source))(exports);exports.install(Bangle,Storage,E);}
+    }
+    if(Bangle.orbitRest)Bangle.orbitRest.configure(s);
+  }
+  function thresholdMenu(s,key){return {value:thresholdIndex(s[key]),min:0,max:6,step:1,
+    format:function(v){return REST_THRESHOLDS[v].toFixed(3)+" g";},
+    onchange:function(v){s[key]=REST_THRESHOLDS[v];applyRest(s);}};}
+  function wearMenu(s){
+    E.showMenu({"":{title:"Non-wear"},"< Back":function(){restMenu(s);},
+      "Enabled":{value:s.restWearEnabled,onchange:function(v){s.restWearEnabled=!!v;applyRest(s);}},
+      "3D drift":thresholdMenu(s,"restWearThreshold"),
+      "Probe seconds":{value:s.restProbeSeconds,min:10,max:60,step:5,
+        onchange:function(v){s.restProbeSeconds=v;applyRest(s);}},
+      "Pulse confidence":{value:s.restPulseConfidence,min:1,max:100,step:1,
+        format:function(v){return v+" %";},onchange:function(v){s.restPulseConfidence=v;applyRest(s);}},
+      "Min pulse BPM":{value:s.restPulseMin,min:20,max:100,step:5,
+        onchange:function(v){s.restPulseMin=v;applyRest(s);}},
+      "Max pulse BPM":{value:s.restPulseMax,min:120,max:240,step:5,
+        onchange:function(v){s.restPulseMax=v;applyRest(s);}}
+    });
+  }
+  function showRestDiagnostics(s){
+    var api=Bangle.orbitRest,d=api&&api.getDiagnostics&&api.getDiagnostics();
+    var list=d&&d.recent,last=list&&list.length?list[list.length-1]:undefined;
+    var hr=["Pending","Detected","Absent","Failed"];
+    var value=!last?"N/A":last.result===254?"0 (unworn)":
+      last.result===255?"Unknown":"Rest "+(1+Math.min(4,Math.floor(Math.min(99,last.result)/20)));
+    var message=last?("Value: "+value+"\nReason: "+last.reason+
+      "\nPulse: "+(hr[last.pulse]||"?")+
+      "\n3D: "+last.driftG+"g"+
+      "\nData: "+last.coverageSec+"s"):"No complete 5-min bin yet";
+    E.showAlert(message,"Rest diagnostics").then(function(){restMenu(s);});
+  }
+  function restMenu(s){
+    E.showMenu({"":{title:"Rest graph"},"< Back":main,
+      "Enabled":{value:s.restEnabled,onchange:function(v){s.restEnabled=!!v;applyRest(s);}},
+      "Max bar height":{value:s.restBarHeight,min:1,max:14,step:1,
+        format:function(v){return v+" px";},onchange:function(v){s.restBarHeight=v;write(CFG,s);}},
+      "Peak threshold":thresholdMenu(s,"restThreshold"),
+      "Non-wear":function(){wearMenu(s);},
+      "Last check":function(){showRestDiagnostics(s);}
+    });
+  }
+
+  function digitalMenu(s){
+    E.showMenu({"":{title:"Digital clock"},"< Back":main,
+      "Date pos":{value:s.datePos,min:0,max:2,step:1,
+        format:function(v){return ["Header","Top left","Below Sun"][v];},
+        onchange:function(v){s.datePos=v;write(CFG,s);}
+      },
+      "Time pos":{value:s.timePos,min:0,max:2,step:1,
+        format:function(v){return ["Header","Top left","Below Sun"][v];},
+        onchange:function(v){s.timePos=v;write(CFG,s);}
+      },
+      "Date size":{value:s.dateSize,min:12,max:30,step:2,onchange:function(v){s.dateSize=v;write(CFG,s);}},
+      "Time size":{value:s.timeSize,min:12,max:30,step:2,onchange:function(v){s.timeSize=v;write(CFG,s);}}
+    });
+  }
+
+  function calendarMenu(){
+    var c=calCfg();
+    E.showMenu({"":{title:"Calendar"},"< Back":main,
       "Calendar region":{value:calRegion(c),min:0,max:3,step:1,format:function(v){return ["Japan","England/Wales","Scotland","N. Ireland"][v];},onchange:function(v){setCalRegion(c,v);}},
       "Auto return":{value:c.timeout,min:15,max:120,step:15,format:function(v){return v+" s";},onchange:function(v){c.timeout=v;write(CAL,c);}},
       "Events":eventsMenu,
       "Holiday cache":cacheMenu
-    };
-    E.showMenu(m);
+    });
+  }
+
+  function main(){
+    stopGPS();releasePlaceData();
+    var s=appCfg();
+    E.showMenu({"":{title:"tenkyu"},"< Back":leave,
+      "Location":function(){locationMenu(s);},
+      "Date/time":function(){dateTimeMenu(s);},
+      "Bodies":function(){bodiesMenu(s);},
+      "Solar eclipse":function(){eclipseMenu(s);},
+      "Rest graph":function(){restMenu(s);},
+      "Dial":function(){dialMenu(s);},
+      "Digital clock":function(){digitalMenu(s);},
+      "Calendar":calendarMenu
+    });
   }
 
   // Release any stale settings-owned GPS request on entry.
@@ -483,3 +671,5 @@
   E.on("kill",onKill);
   main();
 })
+
+
