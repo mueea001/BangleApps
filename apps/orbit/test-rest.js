@@ -1,8 +1,30 @@
-/* global Map, Proxy, __dirname */
-/* node apps/orbit/test-rest.js -- five-minute screen-normal motion-peak ratios. */
+/* global Map, Set, Proxy, __dirname */
+/* node apps/orbit/test-rest.js -- 3D threshold-gated five-minute activity sums. */
 const assert=require("assert"),fs=require("fs"),vm=require("vm"),path=require("path");
 const EventEmitter=require("events"),r=require("./rest.js"),S=r.constants.slotMs;
 const base=Math.floor(Date.parse("2026-10-19T18:00:00Z")/S)*S;
+// The flash-backed city directory must give exact access to all 197 records.
+const placeIndex={},cityRaw=fs.readFileSync(path.join(__dirname,"cities.dat"),"utf8");
+vm.runInNewContext(fs.readFileSync(path.join(__dirname,"locations.js"),"utf8"),
+  {exports:placeIndex});
+const countryNames=placeIndex.countryNames.split("|");
+assert.strictEqual(countryNames.length,197);
+assert.strictEqual(placeIndex.cityOffsets.length,198);
+assert.strictEqual(placeIndex.cityOffsets.at(-1),cityRaw.length);
+const allCountryNames=new Set();
+for(let i=0;i<countryNames.length;i++){
+  const raw=cityRaw.substr(placeIndex.cityOffsets[i],
+    placeIndex.cityOffsets[i+1]-placeIndex.cityOffsets[i]-1);
+  const cities=JSON.parse(raw);
+  assert(cities.length>0||countryNames[i]==="Japan",
+    "No cities for "+countryNames[i]);
+  assert(!allCountryNames.has(countryNames[i]),"Duplicated country "+countryNames[i]);
+  allCountryNames.add(countryNames[i]);
+  for(const city of cities){
+    assert(typeof city[0]==="string"&&city[0]);
+    assert(Number.isFinite(city[1])&&Number.isFinite(city[2]));
+  }
+}
 const quiet={x:0,y:0,z:1,mag:1,diff:0.001};
 function feed(e,start,end,a=quiet,step=1000){
   for(let t=start;t<=end;t+=step)e.sample(a,t);
@@ -18,23 +40,86 @@ function pattern(e,amplitude,step=1000){
 }
 assert.deepStrictEqual(r.thresholds,[.001,.003,.009,.027,.081,.243,.729]);
 assert.strictEqual(r.thresholdG(.03),.027);
-for(const [q,p,c,v] of [[7,10,S,70],[1,2,S,50],[0,3,S,0],[0,0,S,100],[0,0,269000,0]])
-  assert.strictEqual(r.percentFor(q,p,c),v);
+assert.deepStrictEqual(r.activityDefaults,[.5,2,6,18]);
+assert.deepStrictEqual(r.activityThresholds(),[.5,2,6,18]);
+assert.deepStrictEqual([0,.49,.5,1.99,2,5.99,6,17.99,18]
+  .map(x=>r.activityLevel(x,r.activityDefaults)),[100,100,60,60,40,40,20,20,0]);
 const low=r.create({thresholdG:.027});pattern(low,.004);
 assert.strictEqual(low.level(base/S),100);
 const high=r.create({thresholdG:.027});pattern(high,.2);
-assert.strictEqual(high.level(base/S),0);
+assert(high.level(base/S)<100,"Repeated suprathreshold motion must reduce rest level");
 const zeroBars=[];high.visit(base+S*2,(b,v)=>zeroBars.push([b,v]));
-assert.deepStrictEqual(zeroBars,[[base/S,0]]); // a worn, active bin still draws stage 1
+assert.deepStrictEqual(zeroBars,[[base/S,high.level(base/S)]]);
+assert(r.stageFor(high.level(base/S))<5,"Moving intervals draw shortened bars");
 assert.deepStrictEqual([0,19,20,39,40,59,60,79,80,100].map(r.stageFor),
  [1,1,2,2,3,3,4,4,5,5]);
 const stageAngles=[];
 r.draw({setColor:()=>{},drawLine:(...a)=>stageAngles.push(a)},high,
  {nowMs:base+S*2,radiusPx:70,maxHeightPx:10,cx:85,cy:90,currentAngleRad:0});
 assert.strictEqual(stageAngles.length,1);
-assert(Math.abs(Math.hypot(stageAngles[0][2]-85,stageAngles[0][3]-90)-72)<1);
+assert(Math.abs(Math.hypot(stageAngles[0][2]-85,stageAngles[0][3]-90)-
+  (70+10*r.stageFor(high.level(base/S))/5))<1);
 const mixed=r.create({thresholdG:.027});pattern(mixed,k=>k%2?.2:.004);
-assert(Math.abs(mixed.level(base/S)-50)<=4);
+assert(mixed.level(base/S)>=high.level(base/S)&&mixed.level(base/S)<=100);
+// Dedicated 12.5Hz three-axis peak tests: never count sub-gate events.
+function trial(axis,n,amplitude,opts){
+  const x=r.create(Object.assign({thresholdG:.027,wearEnabled:false,
+    activityThresholds:[.5,2,6,18]},opts||{}));
+  for(let t=0;t<=S;t+=80){
+    const a={x:0,y:0,z:1};
+    if(t>=8000&&t<8000+n*8000&&t%8000===0)a[axis]+=amplitude;
+    x.sample(a,base+t);
+  }
+  x.sync(base+S);
+  return {level:x.level(base/S),data:x.getDiagnostics().recent.at(-1)};
+}
+const sub=trial("x",20,.01),single=trial("x",1,.3),
+  many=trial("x",20,.3),manyY=trial("y",20,.3),manyZ=trial("z",20,.3);
+assert.strictEqual(sub.data.peaks,0);
+assert.strictEqual(sub.data.activity,0);
+assert.strictEqual(single.data.peaks,1);
+assert.strictEqual(single.level,100,"One large motion impulse must not force stage 1");
+assert(many.data.peaks>=19&&many.data.activity>single.data.activity*10);
+assert.strictEqual(many.level,manyY.level);
+assert.strictEqual(many.level,manyZ.level);
+assert.strictEqual(many.data.peaks,manyY.data.peaks);
+assert(many.data.activity>0);
+
+// v0.076: 270..300s valid XYZ coverage normalizes peak sum to 300s
+// BEFORE stage boundaries; <270s must remain unknown (FF).
+assert.strictEqual(r.activity300(6,300000),6);
+assert.strictEqual(r.activity300(6,270000),6*300/270);
+assert.strictEqual(r.activity300(6,269000),6); // never applied: invalid bin
+function coverageTrial(seconds,cuts){
+  const x=r.create({thresholdG:.027,wearEnabled:false,
+    activityThresholds:cuts||[.5,2,6,18],nowMs:base});
+  for(let t=0;t<=seconds*1000;t+=80){
+    const a={x:t>0&&t%8000===0?.3:0,y:0,z:1};
+    x.sample(a,base+t);
+  }
+  x.sync(base+S);
+  return {engine:x,diagnostic:x.getDiagnostics().recent.at(-1)};
+}
+const cv270=coverageTrial(270);
+const cv300=coverageTrial(300);
+const cv269=coverageTrial(269);
+assert(Math.abs(cv270.diagnostic.activity300-
+  cv270.diagnostic.activity*300/270)<.002);
+assert(Math.abs(cv300.diagnostic.activity300-cv300.diagnostic.activity)<.002);
+assert.strictEqual(cv269.diagnostic.result,255);
+assert.strictEqual(cv269.diagnostic.activity300,null);
+assert.strictEqual(cv269.engine.snapshot().levels.slice(-2),"ff");
+const cut=cv270.diagnostic.activity*1.05;
+assert(cut>0);
+const boundary=coverageTrial(270,[cut,cut*2,cut*3,cut*4]);
+assert.strictEqual(boundary.diagnostic.result,60,
+  "Corrected 270s sum must cross L5/L4 boundary while raw sum would not");
+
+// User-chosen boundaries change only bar stages, not the activity sum.
+const custom=trial("x",20,.3,{activityThresholds:[.1,.2,.3,.4]});
+assert.strictEqual(custom.data.activity,many.data.activity);
+assert.strictEqual(custom.level,0);
+assert.strictEqual(r.activityLevel(many.data.activity,[10,20,30,40]),100);
 const still=r.create();feed(still,base,base+S);
 assert.strictEqual(still.level(base/S),100);
 assert.strictEqual(still.snapshot().v,3);
@@ -83,14 +168,25 @@ function environment(start,config={},data,extraModules){
     restWearEnabled:false,coordVersion:2,locationSource:"manual",manualLat:25.3,manualLon:-104.1},config);
   const modules=Object.assign({"orbit.rest":"rest.js","orbit.eclipse":"eclipse.js","orbit.ecldraw":"eclipse-render.js",
     "orbit.ecldata":"eclipse-terms.js","orbit.eclsun":"eclipse-sun-terms.js"},extraModules||{});
+  const placeReads=[];
   const storage={readJSON:n=>n==="orbit.json"?cfg:n==="setting.json"?{timeout:0}:store[n],
     writeJSON:(n,v)=>{writes++;store[n]=JSON.parse(JSON.stringify(v));},
-    read:n=>modules[n]?(modules[n].indexOf("\n")>=0||modules[n].charAt(0)==="("?
-      modules[n]:fs.readFileSync(path.join(__dirname,modules[n]),"utf8")):undefined};
+    read:(n,start,length)=>{
+      if(n==="orbitcities.dat"||n==="orbitjp.dat"){
+        placeReads.push({name:n,offset:start,length:length});
+        if(n==="orbitcities.dat")return fakeCityData.substr(start,length);
+        return undefined;
+      }
+      return modules[n]?(modules[n].indexOf("\n")>=0||modules[n].charAt(0)==="("?
+        modules[n]:fs.readFileSync(path.join(__dirname,modules[n]),"utf8")):undefined;
+    }};
   const g=new Proxy({getWidth:()=>176,getHeight:()=>176,stringWidth:s=>s.length*8,theme:{bg:0,fg:0xffff}},
     {get:(o,k)=>k in o?o[k]:k==="transformVertices"?undefined:(...args)=>{
       if(k==="setColor")color=args[0];log.push({op:k,args,color});return g;}});
   const b=new EventEmitter(),events=new EventEmitter(),locks=[],lights=[];
+  let charging=false,battery=0;
+  b.isCharging=()=>charging;
+  events.getBattery=()=>battery;
   for(const n of ["setGPSPower","loadWidgets","drawWidgets"])
     b[n]=()=>{};
   b.setUI=ui=>{b.ui=ui;};
@@ -100,7 +196,23 @@ function environment(start,config={},data,extraModules){
   const power=[];b.setHRMPower=(on,id)=>{power.push([now,on,id]);return !!on;};
   b.isLCDOn=()=>true;
   class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
-  const context={Date:Clock,g,Bangle:b,E:events,require:n=>{assert.strictEqual(n,"Storage");return storage;},
+  let placeIndexLoads=0;
+  const fakeCountries=["Afghanistan","Albania","Algeria","Andorra","Angola",
+    "Antigua and Barbuda","Argentina","Armenia","Australia","Austria",
+    "Azerbaijan","Belgium","Japan","Zimbabwe"].map(n=>[n,[[n+" City",0,0]]]);
+  const cityLines=fakeCountries.map(c=>JSON.stringify(c[1])+"\n");
+  const fakeCityData=cityLines.join("");
+  const cityOffsets=[0];
+  for(const line of cityLines)cityOffsets.push(cityOffsets.at(-1)+line.length);
+  const locData={countryNames:fakeCountries.map(c=>c[0]).join("|"),
+    countryCount:fakeCountries.length,cityOffsets:cityOffsets,
+    prefs:[["Tokyo",[["Chiyoda-ku",35.69,139.75]]]],jpidx:[]};
+  const context={Date:Clock,g,Bangle:b,E:events,require:n=>{
+    if(n==="Storage")return storage;
+    if(n==="orbitloc"){placeIndexLoads++;return locData;}
+    if(n==="orbittz")return {get:()=>[540,0]};
+    throw new Error("Unknown module "+n);
+  },
     setTimeout:(f,ms)=>{timers.set(++serial,{f,ms,at:now+ms});return serial;},clearTimeout:id=>timers.delete(id),load:()=>{}};
   function execute(file){return vm.runInNewContext(fs.readFileSync(path.join(__dirname,file),"utf8"),context);}
   function advance(t){
@@ -108,7 +220,11 @@ function environment(start,config={},data,extraModules){
       if(!due)break;timers.delete(due[0]);now=due[1].at;due[1].f();}
     now=t;
   }
-  return {b,events,log,timers,cfg,store,storage,execute,power,locks,lights,advance,writes:()=>writes,setNow:t=>now=t,
+  return {b,events,log,timers,cfg,store,storage,placeReads,
+    setCharging:(state,pct)=>{charging=!!state;battery=pct;b.emit("charging",charging);},
+    setBattery:pct=>{battery=pct;},
+    placeIndexLoads:()=>placeIndexLoads,
+    execute,power,locks,lights,advance,writes:()=>writes,setNow:t=>now=t,
     feed:(end,a=quiet)=>{for(let t=now;t<=end;t+=800){now=t;b.emit("accel",a);}now=end;}};
 }
 
@@ -116,6 +232,31 @@ function environment(start,config={},data,extraModules){
 const app=environment(base);
 app.execute("boot.js");assert.strictEqual(app.b.listenerCount("accel"),1);
 app.execute("app.js");assert.strictEqual(app.b.listenerCount("accel"),1);
+// First display update precedes Earth-map caching and full globe rendering.
+assert(app.log.some(e=>e.op==="fillCircle"),
+  "Opening the clock should immediately paint the Sun");
+assert(!app.log.some(e=>e.op==="fillPoly"),
+  "Map and eclipse rendering should be deferred after first LCD flush");
+assert(app.log.some(e=>e.op==="flip"),
+  "First layer must be made visible before expensive rendering");
+app.advance(base); // Drain the three zero-delay stages.
+assert(app.log.some(e=>e.op==="fillPoly"),
+  "Earth and Moon must appear on subsequent frames");
+// Only the NIGHT polygon resolution changes. Leave the white coastline,
+// polar cap and final white limb rendering in their existing order.
+const nightMaskAt=app.log.findIndex(e=>e.op==="fillPoly"&&
+  e.color===0x0008&&Array.isArray(e.args[0]));
+assert(nightMaskAt>=0,"Earth night mask must be painted");
+const nightMask=app.log[nightMaskAt].args[0];
+assert.strictEqual(nightMask.length,100,
+  "24 mask subdivisions should yield 50 vertices / 100 XY coordinates");
+assert(nightMask.length/2<=64,"Espruino fillPoly is limited to 64 points");
+assert(app.log.slice(nightMaskAt+1).some(e=>e.op==="drawPoly"&&e.color===0xFFFF),
+  "Preserve white coastlines above the night mask");
+assert(app.log.slice(nightMaskAt+1).some(e=>e.op==="fillCircle"&&e.color===0xFFFF),
+  "Preserve the white polar cap above the night mask");
+const initialFlipCount=app.log.filter(e=>e.op==="flip").length;
+assert(initialFlipCount>=4,"Opening must visibly flush each incremental stage");
 assert([...app.timers.values()].some(x=>x.ms<=10000),
   "Backlight must have a finite default-off timer");
 app.advance(base+10000);
@@ -132,6 +273,25 @@ app.advance(base+S+1); // Complete the deferred clock redraw after first frame.
 const graph=app.log.findIndex(x=>x.op==="drawLine"&&x.color===0x07e0);
 const observer=app.log.findIndex(x=>x.op==="fillCircle"&&x.color===0xf800&&x.args[2]===2);
 assert(graph>=0&&observer>graph);
+// v0.078: dial glyphs are drawn BEFORE the rest bars and non-wear arcs.
+// The red observer marker must remain above both.
+const layered=environment(base,{orbitHourEnabled:true,orbitHourStep:3,restWearEnabled:false},
+  {"orbit.rest.json":{v:3,end:base/S-1,levels:"ff".repeat(287)+"64"}});
+layered.execute("boot.js");layered.execute("app.js");
+layered.advance(base); // Complete staged initial layers.
+const dialIndices=[];
+layered.log.forEach((e,i)=>{
+  if(e.op==="drawString"&&/^(XII|I|II|III|IV|V|VI|VII|VIII|IX|X|XI)$/.test(e.args[0]))
+    dialIndices.push(i);
+});
+assert.strictEqual(dialIndices.length,8,"All dial numerals must be rendered");
+const lastDial=dialIndices[dialIndices.length-1];
+const restOnTop=layered.log.findIndex((e,i)=>i>lastDial&&e.op==="drawLine"&&
+  (e.color===0x07E0||e.color===0xFFE0));
+const pointOnTop=layered.log.findIndex((e,i)=>i>restOnTop&&e.op==="fillCircle"&&
+  e.color===0xF800&&e.args[2]===2);
+assert(restOnTop>lastDial&&pointOnTop>restOnTop,
+  "Dial must be behind rest graph, with red observer marker on top");
 app.b.emit("lcdPower",false);assert.strictEqual(app.timers.size,0);
 app.feed(base+S*2);
 app.b.orbitRest.sync(base+S*2);
@@ -147,32 +307,104 @@ assert.strictEqual(other.b.listenerCount("accel"),1);
 const off=environment(base,{restEnabled:false});
 off.execute("boot.js");off.execute("app.js");
 assert.strictEqual(off.b.listenerCount("accel"),0);
-// Menus expose percent height and seven Z-peak thresholds.
+// Menus expose five-level height, seven 3-axis peak gates and four boundaries.
 const menus=[];app.events.showMenu=m=>menus.push(m);
-app.execute("settings.js")(()=>{});menus.at(-1)["Rest graph"]();
+app.execute("settings.js")(()=>{});
+assert.strictEqual(menus.at(-1)[""].title,"tenkyu v0.082");
+assert(!menus.at(-1)["Version"],"Version is a static title, not a button");
+menus.at(-1)["Rest graph"]();
 assert.strictEqual(menus.at(-1)["Max bar height"].max,14);
 menus.at(-1)["Max bar height"].onchange(14);
 assert.strictEqual(app.cfg.restBarHeight,14);
-const q=menus.at(-1)["Peak threshold"];
+const q=menus.at(-1)["Peak gate"];
 assert.strictEqual(q.max,6);
 for(let i=0;i<7;i++){q.onchange(i);assert.strictEqual(app.cfg.restThreshold,r.thresholds[i]);}
+menus.at(-1)["Stage boundaries"]();
+assert.deepStrictEqual([1,2,3,4].map(i=>app.cfg["restActivityT"+i]),r.activityDefaults);
+const newLevel=menus.at(-1)["L5/4 boundary"];
+newLevel.onchange(.6);
+assert.strictEqual(app.cfg.restActivityT1,.6);
+assert.strictEqual(app.cfg.restActivityT2,2);
+menus.at(-1)["< Back"]();
 menus.at(-1)["Non-wear"]();
 menus.at(-1)["3D drift"].onchange(0);
 assert.strictEqual(app.cfg.restWearThreshold,.001);
-const alerts=[];
-app.events.showAlert=(message,title)=>{alerts.push({message,title});return {then:cb=>cb()};};
+assert(!menus.at(-1)["Min pulse BPM"]&&!menus.at(-1)["Max pulse BPM"]);
+assert(!("restPulseMin" in app.cfg)&&!("restPulseMax" in app.cfg));
+assert(menus.at(-1)["Pulse confidence"]);
+assert(menus.at(-1)["Keep until move"]);
 menus.at(-1)["< Back"](); // Rest graph menu
 menus.at(-1)["Last check"]();
-assert.strictEqual(alerts.length,1);
-assert(alerts[0].message.includes("Reason:"));
-assert(alerts[0].message.includes("3D:"));
-assert(alerts[0].message.includes("Data:"));
+assert(menus.at(-1)["Reason"]);
+assert(menus.at(-1)["Pulse"]);
+assert(menus.at(-1)["Hold"]);
+assert(menus.at(-1)["Shared HRM"]);
+assert(menus.at(-1)["Conf."]);
+assert(menus.at(-1)["3D drift"]);
+assert(menus.at(-1)["Peak sum"]);
+assert(menus.at(-1)["Data"]);
+assert(menus.at(-1)["Raw sum"],"Valid latest check exposes raw and corrected sums");
+// Location must acknowledge the click immediately and open on the next tick.
+// Long country lists are split into initial-letter groups and 7-item pages.
+const loc=environment(base);
+const locMenus=[];
+loc.events.showMenu=m=>locMenus.push(m);
+loc.execute("settings.js")(()=>{});
+locMenus.at(-1)["Location"]();
+assert(locMenus.at(-1)["Place name"],"Location menu must expose Place name");
+locMenus.at(-1)["Place name"]();
+assert(loc.log.some(x=>x.op==="drawString"&&x.args[0]==="Places..."));
+assert(locMenus.at(-1)["Country"],"Place menu must open immediately, without timers");
+assert.strictEqual(loc.placeIndexLoads(),0,"No data may be loaded before the first menu");
+loc.advance(base+1);
+assert.strictEqual(loc.placeReads.length,0,"Initial place screen must not load cities or municipality");
+assert.strictEqual(loc.placeIndexLoads(),0,
+  "Place name first screen must not even require the location index");
+assert(locMenus.at(-1)["Country"],"Place selection must open after visible ACK");
+locMenus.at(-1)["Country"]();
+assert(loc.log.some(x=>x.op==="drawString"&&x.args[0]==="Countries..."));
+loc.advance(base+2);
+assert(locMenus.at(-1)["A-D"]&&locMenus.at(-1)["U-Z"]);
+assert.strictEqual(loc.placeIndexLoads(),1,
+  "Country index must be required only after requesting Country");
+locMenus.at(-1)["A-D"]();
+assert(locMenus.at(-1)["A (11)"]);
+locMenus.at(-1)["A (11)"]();
+assert(locMenus.at(-1)["Afghanistan"]);
+assert(locMenus.at(-1)["Next >"]);
+locMenus.at(-1)["Next >"]();
+assert(locMenus.at(-1)["< Previous"]);
+locMenus.at(-1)["< Previous"]();
+locMenus.at(-1)["Afghanistan"]();
+loc.advance(base+3);
+assert.strictEqual(loc.cfg.countryName,"Afghanistan");
+assert.strictEqual(loc.placeReads.length,0,"Country selection must only change index");
+assert(locMenus.at(-1)["City"],"Open cities only when user requests a city");
+locMenus.at(-1)["City"]();
+loc.advance(base+4);
+assert.strictEqual(loc.placeReads.length,1);
+assert.strictEqual(loc.placeReads[0].name,"orbitcities.dat");
+assert(locMenus.at(-1)["Afghanistan City"]);
+locMenus.at(-1)["Afghanistan City"]();
+assert.strictEqual(loc.cfg.locName,"Afghanistan City");
+assert(locMenus.at(-1)["Use place"]);
+locMenus.at(-1)["Country"]();
+loc.advance(base+5);
+locMenus.at(-1)["Japan (quick)"]();
+loc.advance(base+6);
+assert.strictEqual(loc.cfg.countryName,"Japan");
+assert(locMenus.at(-1)["Prefecture"]);
+assert.strictEqual(loc.placeReads.length,1,
+  "Japan opening must not load municipalities before selecting Municipality");
+locMenus.at(-1)["Municipality"]();
+loc.advance(base+7);
+assert(locMenus.at(-1)["Chiyoda-ku"]);
 // Day/night timestamps and backward-compatible v2 percentage history render.
 for(const [iso,c] of [["2026-10-19T18:00:00Z",0x07e0],["2026-10-19T06:00:00Z",0xffe0]]){
   const now=Date.parse(iso),end=Math.floor(now/S);
   const h=environment(now,{},{"orbit.rest.json":{v:2,end:end-1,
     levels:"64".repeat(288),active:{bucket:end,covered:0,peaks:0,quietPeaks:0}}});
-  h.execute("boot.js");h.execute("app.js");
+  h.execute("boot.js");h.execute("app.js");h.advance(now);
   const bars=h.log.filter(x=>x.op==="drawLine"&&(x.color===0x07e0||x.color===0xffe0));
   assert.strictEqual(bars.length,288);
   assert(bars.some(x=>x.color===0x07e0)&&bars.some(x=>x.color===0xffe0));
@@ -186,12 +418,152 @@ function runWear(pulse,zAt=()=>1,cfg={}){
     h.advance(base+t);
     const v=zAt(t),xyz=typeof v==="number"?{x:0,y:0,z:v}:v;
     h.b.emit("accel",Object.assign({mag:1,diff:0},xyz));
-    if(t===280000&&pulse)h.b.emit("HRM",pulse);
+    if(t===280000)h.b.emit("HRM",pulse||{bpm:0,confidence:0});
   }
   return h;
 }
 const nw=runWear();assert.strictEqual(nw.b.orbitRest.getEngine().level(base/S),0);
 assert.strictEqual(nw.b.orbitRest.getDiagnostics().recent.at(-1).reason,"nonwear");
+// Non-wear (FE) is a grey full stage-5-length bar; charging is red by battery %.
+// No-data (FF) must stay invisible, and the original five-stage bars remain.
+function restStrokes(engine,ms){
+  const lines=[];let ink;
+  const graphics={setColor:c=>{ink=c;return graphics;},
+    drawLine:(...p)=>lines.push({color:ink,points:p})};
+  r.draw(graphics,engine,{nowMs:ms,radiusPx:70,maxHeightPx:10,
+    cx:85,cy:90,south:false,currentAngleRad:0,isDayAt:()=>true});
+  return lines;
+}
+const nonWearBars=restStrokes(nw.b.orbitRest.getEngine(),base+S+1000);
+assert.strictEqual(nonWearBars.length,1);
+assert.strictEqual(nonWearBars[0].color,0x8410);
+const [x1,y1,x2,y2]=nonWearBars[0].points;
+assert(Math.abs(Math.hypot(x1-85,y1-90)-70)<1.1,"Grey bar must start on orbit");
+assert(Math.abs(Math.hypot(x2-85,y2-90)-80)<1.1,"Grey bar must reach rest stage-5 length");
+assert(Math.hypot(x1-x2,y1-y2)>=9,"Grey non-wear must be radial, not a short arc");
+const missing=r.create({wearEnabled:true,nowMs:base});
+feed(missing,base,base+100000);
+missing.sync(base+S);
+assert.strictEqual(missing.snapshot().levels.slice(-2),"ff");
+assert.deepStrictEqual(restStrokes(missing,base+S+1000),[],
+  "Unknown data must not be painted red");
+const restoredNonWear=r.create({saved:nw.b.orbitRest.getEngine().snapshot(),
+  nowMs:base+S+1000});
+assert.deepStrictEqual(restStrokes(restoredNonWear,base+S+1000),nonWearBars,
+  "Unworn grey bars must survive saving and reopening the clock");
+const normalBar=restStrokes(high,base+S*2);
+assert(normalBar.length===1&&normalBar[0].color===0x07E0,
+  "Normal motion must retain its green radial bar");
+// Full-day absence paints 288 full-length grey radial bars.
+const allOff=r.create({saved:{v:3,end:base/S+287,
+  levels:"fe".repeat(288)},nowMs:base+S*288+1000});
+const allOffLines=restStrokes(allOff,base+S*288+1000);
+assert.strictEqual(allOffLines.length,288);
+assert(allOffLines.every(x=>x.color===0x8410));
+for(const line of allOffLines){
+  const [ax,ay,bx,by]=line.points;
+  assert(Math.abs(Math.hypot(ax-85,ay-90)-70)<1.1,
+    "Full-day unworn bar must start at the orbit");
+  assert(Math.abs(Math.hypot(bx-85,by-90)-80)<1.1,
+    "Full-day unworn bar must have rest stage-5 length");
+}
+// A legacy v2 code 00 is "missing", not a non-wear interval.
+const legacyMissing=r.create({saved:{v:2,end:base/S,
+  levels:"ff".repeat(287)+"00"},nowMs:base+S+1000});
+assert.deepStrictEqual(restStrokes(legacyMissing,base+S+1000),[]);
+// Charging uses special v3 codes 101..201 without altering 254/unworn.
+// Its red radial length represents remaining battery percentage, not
+// percentage of five-minute charging time. No XYZ coverage is required.
+function chargingTrial(pct){
+  const e=r.create({nowMs:base,wearEnabled:true});
+  e.sync(base);e.setCharging(true,pct);
+  e.sync(base+S);
+  return e;
+}
+assert.strictEqual(r.constants.chargeBase,101);
+assert.strictEqual(r.constants.chargeEnd,201);
+for(const pct of [0,10,25,50,75,100]){
+  const e=chargingTrial(pct),value=101+pct;
+  assert.strictEqual(e.snapshot().levels.slice(-2),value.toString(16).padStart(2,"0"));
+  assert.strictEqual(e.getDiagnostics().recent.at(-1).reason,"charging");
+  let readings=[];
+  e.visit(base+S+1000,()=>{},()=>{},()=>{},(bucket,battery)=>readings.push(battery));
+  assert.deepStrictEqual(readings,[pct]);
+  const strokes=restStrokes(e,base+S+1000);
+  assert.strictEqual(strokes.length,1);
+  assert.strictEqual(strokes[0].color,0xF800);
+  const [ax,ay,bx,by]=strokes[0].points;
+  const bar=Math.hypot(bx-85,by-90)-Math.hypot(ax-85,ay-90);
+  assert(Math.abs(bar-10*pct/100)<1.2,
+    "Charging bar must scale with battery: "+pct+"%, actual "+bar);
+  const restored=r.create({saved:e.snapshot(),nowMs:base+S+1000});
+  assert.deepStrictEqual(restStrokes(restored,base+S+1000),strokes,
+    "Charging percent survives flash snapshot");
+}
+const partCharge=r.create({nowMs:base,wearEnabled:false});
+partCharge.sample(quiet,base);
+partCharge.setCharging(true,42);
+partCharge.setCharging(false,42);
+partCharge.sync(base+S);
+assert.strictEqual(partCharge.snapshot().levels.slice(-2),"8f",
+  "Any charging during the five-minute interval takes priority over rest stage");
+const liveCharge=r.create({nowMs:base});
+liveCharge.sync(base);liveCharge.setCharging(true,60);
+assert.strictEqual(restStrokes(liveCharge,base+150000).length,1,
+  "Current charging interval must be displayed without waiting 5 minutes");
+assert.strictEqual(restStrokes(liveCharge,base+150000)[0].color,0xF800);
+
+// Boot recorder observes the hardware charger without starting HRM.
+const chargedWatch=environment(base,{restWearEnabled:true});
+chargedWatch.execute("boot.js");
+assert.strictEqual(chargedWatch.b.listenerCount("charging"),1);
+chargedWatch.setCharging(true,55);
+assert.strictEqual(chargedWatch.b.orbitRest.getEngine().getLive().charging,true);
+chargedWatch.setBattery(62);
+chargedWatch.feed(base+S);
+assert.strictEqual(chargedWatch.b.orbitRest.getEngine().snapshot().levels.slice(-2),
+  (101+62).toString(16),"Charging records the last sampled percentage");
+assert.strictEqual(chargedWatch.b.orbitRest.getDiagnostics().recent.at(-1).reason,
+  "charging");
+assert.strictEqual(chargedWatch.power.filter(x=>x[1]===1).length,0,
+  "Charging must never turn on optical HRM");
+chargedWatch.setCharging(false,62);
+chargedWatch.feed(base+2*S);
+const afterUnplug=chargedWatch.b.orbitRest.getEngine().snapshot().levels.slice(-2);
+assert(!(parseInt(afterUnplug,16)>=101&&parseInt(afterUnplug,16)<=201),
+  "Unplugging must restore normal 3D motion/HRM classification");
+// Initial charging state must be read even if the event occurred before boot.
+const chargingAtBoot=environment(base,{restWearEnabled:true});
+chargingAtBoot.setCharging(true,80);
+chargingAtBoot.execute("boot.js");
+assert.strictEqual(chargingAtBoot.b.orbitRest.getEngine().getLive().chargePercent,80);
+chargingAtBoot.advance(base+S);
+chargingAtBoot.b.emit("accel",quiet);
+assert.strictEqual(chargingAtBoot.b.orbitRest.getEngine().snapshot().levels.slice(-2),"b5");
+
+// Keep recording for hours while charging even with NO accelerometer events.
+const noAccelCharge=environment(base,{restWearEnabled:true});
+noAccelCharge.setCharging(true,34);
+noAccelCharge.execute("boot.js");
+noAccelCharge.setBattery(47);
+noAccelCharge.advance(base+S+1000); // Charger minute timer must roll the slot.
+assert.strictEqual(noAccelCharge.b.orbitRest.getEngine().snapshot().levels.slice(-2),
+  (101+47).toString(16),"Charging must record without accelerometer events");
+// A pending HRM probe must release its sensor power as soon as charging begins.
+const stopOnCharge=environment(base,{restWearEnabled:true});
+stopOnCharge.execute("boot.js");
+for(let t=0;t<270000;t+=1000){
+  stopOnCharge.advance(base+t);
+  stopOnCharge.b.emit("accel",quiet);
+}
+stopOnCharge.advance(base+270000);
+assert(stopOnCharge.b.orbitRest.isProbing());
+stopOnCharge.setCharging(true,35);
+assert.strictEqual(stopOnCharge.b.orbitRest.isProbing(),false);
+assert.deepStrictEqual(stopOnCharge.power.slice(-2),
+  [[base+270000,1,"orbitrest"],[base+270000,0,"orbitrest"]],
+  "Stop an active optical HRM measurement on charge");
+
 // 297 seconds are more than 270s coverage and are valid for non-wear.
 // Previous code incorrectly required a sample within 2.5s of the slot start.
 const lateStart=environment(base+3000,{restWearEnabled:true});
@@ -199,6 +571,7 @@ lateStart.execute("boot.js");
 for(let t=3000;t<=S;t+=1000){
   lateStart.advance(base+t);
   lateStart.b.emit("accel",{x:0,y:0,z:1,mag:1,diff:0});
+  if(t===280000)lateStart.b.emit("HRM",{bpm:0,confidence:0});
 }
 assert.strictEqual(lateStart.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fe");
 assert.strictEqual(lateStart.b.orbitRest.getDiagnostics().recent.at(-1).reason,"nonwear");
@@ -210,8 +583,27 @@ assert.strictEqual(skipped.getDiagnostics().recent.at(-1).reason,"nonwear_hrm_un
 const failed=r.create({wearEnabled:true,nowMs:base});
 feed(failed,base,base+S);
 failed.failedProbe(base/S);
-assert.strictEqual(failed.snapshot().levels.slice(-2),"fe");
+assert.strictEqual(failed.snapshot().levels.slice(-2),"fd");
 assert.strictEqual(failed.getDiagnostics().recent.at(-1).reason,"nonwear_hrm_failed");
+const whiteLines=restStrokes(failed,base+S+1000);
+assert.strictEqual(whiteLines.length,1);
+assert.strictEqual(whiteLines[0].color,0xFFFF,
+  "Failed HRM must produce a white orbital arc");
+// Failure backoff: +60 seconds once, then +900 seconds.
+const retry=environment(base,{restWearEnabled:true});
+let badStarts=0;
+retry.b.setHRMPower=on=>{if(on)badStarts++;return !on;};
+retry.execute("boot.js");
+for(let t=0;t<=1230000;t+=1000){
+  retry.advance(base+t);
+  retry.b.emit("accel",{x:0,y:0,z:1});
+  if(t===270000||t===330000||t===1230000)
+    assert.strictEqual(badStarts,t===270000?1:t===330000?2:3);
+}
+assert.strictEqual(badStarts,3);
+assert.strictEqual(retry.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fd");
+assert(restStrokes(retry.b.orbitRest.getEngine(),base+1230000)
+  .every(line=>line.color===0xFFFF));
 const rejected=environment(base,{restWearEnabled:true});
 rejected.b.setHRMPower=(on)=>!on; // Hardware declines the HRM-power request.
 rejected.execute("boot.js");
@@ -219,7 +611,7 @@ for(let t=0;t<=S;t+=1000){
   rejected.advance(base+t);
   rejected.b.emit("accel",{x:0,y:0,z:1});
 }
-assert.strictEqual(rejected.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fe");
+assert.strictEqual(rejected.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fd");
 assert.strictEqual(rejected.b.orbitRest.getDiagnostics().recent.at(-1).reason,"nonwear_hrm_failed");
 // A late no-pulse callback still updates the just-closed five-minute bin.
 skipped.absentPulse(base/S);
@@ -227,15 +619,68 @@ assert.strictEqual(skipped.snapshot().levels.slice(-2),"fe");
 assert.strictEqual(skipped.getDiagnostics().recent.at(-1).reason,"nonwear");
 assert(nw.b.orbitRest.getEngine().snapshot().levels.endsWith("fe"));
 assert.deepStrictEqual(nw.power,[[base+270000,1,"orbitrest"],[base+S,0,"orbitrest"]]);
-assert.strictEqual(nw.b.listenerCount("HRM"),0);
-const detected=runWear({bpm:60,confidence:90});
+assert.strictEqual(nw.b.listenerCount("HRM"),1,
+  "Shared HRM listener stays attached for readings from other apps");
+// Motion detected before the HRM window must save all optical LED energy.
+const moving=runWear(null,t=>({x:.6+.02*t/S,y:.8,z:0}));
+assert.deepStrictEqual(moving.power,[],
+  "Motion establishes wearing without any optical HRM probe");
+// Reuse HRM readings from another app's power request, without
+// overriding its power state or starting a duplicate optical probe.
+const shared=environment(base,{restWearEnabled:true});
+shared.b.isHRMOn=()=>true;
+shared.execute("boot.js");
+for(let t=0;t<=S*2;t+=1000){
+  shared.advance(base+t);
+  shared.b.emit("accel",{x:0,y:0,z:1});
+  if(t===260000)shared.b.emit("HRM",{bpm:68,confidence:95});
+}
+assert.deepStrictEqual(shared.power,[],
+  "Reliable HRM reading from an existing owner must avoid own power requests");
+assert.strictEqual(shared.b.orbitRest.getEngine().snapshot().levels.slice(-2),"64");
+assert(shared.b.orbitRest.getDiagnostics().sharedPulseCount>=1);
+assert.strictEqual(shared.b.listenerCount("HRM"),1);
+// A powered external sensor without a good pulse is observed passively
+// and never switched off by tenkyu (even when the window times out).
+const passive=environment(base,{restWearEnabled:true});
+passive.b.isHRMOn=()=>true;
+passive.execute("boot.js");
+for(let t=0;t<=S;t+=1000){
+  passive.advance(base+t);passive.b.emit("accel",{x:0,y:0,z:1});
+  if(t===280000)passive.b.emit("HRM",{bpm:0,confidence:0});
+}
+assert.deepStrictEqual(passive.power,[]);
+assert.strictEqual(passive.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fe");
+const detected=runWear({bpm:60,confidence:91});
 assert.strictEqual(detected.b.orbitRest.getEngine().level(base/S),100);
 assert.deepStrictEqual(detected.power,[[base+270000,1,"orbitrest"],[base+280000,0,"orbitrest"]]);
 assert.strictEqual(detected.b.orbitRest.getDiagnostics().recent.at(-1).reason,"pulse_detected_still");
 // After a valid early HRM detection, do not immediately start a second
 // optical probe during the same 5-minute interval.
 assert.deepStrictEqual(detected.power.filter(x=>x[1]===1).map(x=>x[0]),[base+270000]);
+assert.strictEqual(detected.b.orbitRest.isProbing(),false);
+assert.strictEqual(nw.b.orbitRest.isProbing(),false);
+// A new movement during an already-running probe must release the LED
+// before the five-minute boundary, not leave it on for the full window.
+const interrupted=environment(base,{restWearEnabled:true});
+interrupted.execute("boot.js");
+for(let t=0;t<=S;t+=1000){
+  interrupted.advance(base+t);
+  interrupted.b.emit("accel",{x:t>=275000?.06:0,y:0,z:1});
+}
+assert.deepStrictEqual(interrupted.power.slice(0,2).map(q=>q[1]),[1,0]);
+assert(interrupted.power[1][0]<base+S,
+  "Motion must turn the optical sensor off before its timeout");
+assert.strictEqual(interrupted.b.orbitRest.isProbing(),false);
+assert.strictEqual(interrupted.b.listenerCount("HRM"),1,
+  "Shared HRM event listener remains active when an owned probe stops");
+assert.strictEqual(detected.b.orbitRest.getDiagnostics().recent.at(-1).confidence,91);
+assert.strictEqual(runWear({bpm:60,confidence:90}).b.orbitRest.getEngine().level(base/S),0,
+  "Confidence equal to configured threshold is insufficient");
 assert.strictEqual(runWear({bpm:60,confidence:89}).b.orbitRest.getEngine().level(base/S),0);
+assert.strictEqual(runWear({bpm:10,confidence:95}).b.orbitRest.getEngine().level(base/S),100);
+assert.strictEqual(runWear({bpm:260,confidence:95}).b.orbitRest.getEngine().level(base/S),100);
+assert.strictEqual(runWear({bpm:0,confidence:100}).b.orbitRest.getEngine().level(base/S),0);
 assert.strictEqual(runWear(null,t=>1+t/S*.02).b.orbitRest.getEngine().snapshot().levels.slice(-2),"64");
 // Wristband may be vertical, sideways or tilted on a table: one shared 3D
 // vector-drift threshold must recognize all constant orientations as unworn.
@@ -272,14 +717,21 @@ for(let t=0;t<=S;t+=80){
 filtered.absentPulse(base/S);
 filtered.sync(base+S);
 assert.strictEqual(filtered.snapshot().levels.slice(-2),"fe");
-// All axes must be present. A missing X/Y reading cannot masquerade as stillness.
-const badAxis=r.create();
+// One invalid reading is not sufficient to erase 270+ seconds of good
+// motionless XYZ coverage. Repeated missing readings still mean unknown.
+const badAxis=r.create({wearEnabled:true});
 for(let t=0;t<=S;t+=1000){
   const a=t===4000?{z:1}:{x:0,y:0,z:1};
   badAxis.sample(a,base+t);
 }
 badAxis.absentPulse(base/S);badAxis.sync(base+S);
-assert.notStrictEqual(badAxis.snapshot().levels.slice(-2),"fe");
+assert.strictEqual(badAxis.snapshot().levels.slice(-2),"fe",
+  "One missing XYZ reading must not hide non-wear red arc");
+const repeatedMissing=r.create({wearEnabled:true});
+for(let t=0;t<=S;t+=1000)
+  repeatedMissing.sample(t%3000===0?{z:1}:{x:0,y:0,z:1},base+t);
+repeatedMissing.absentPulse(base/S);repeatedMissing.sync(base+S);
+assert.strictEqual(repeatedMissing.snapshot().levels.slice(-2),"ff");
 // Completion callback 3.5 seconds late: the previous code ignored this
 // result and permanently displayed a stage-5 bar for an unworn watch.
 const delayed=environment(base,{restWearEnabled:true});
@@ -292,6 +744,7 @@ assert(endTimer,"HRM end timer must be scheduled");
 endTimer.at+=3500;
 for(let t=271000;t<=S;t+=1000){
   delayed.advance(base+t);delayed.b.emit("accel",{x:0,y:0,z:1});
+  if(t===280000)delayed.b.emit("HRM",{bpm:0,confidence:0});
 }
 assert.strictEqual(delayed.b.orbitRest.getEngine().snapshot().levels.slice(-2),"fe");
 assert.strictEqual(delayed.b.orbitRest.getDiagnostics().recent.at(-1).reason,"nonwear_hrm_unknown");
@@ -311,7 +764,7 @@ const fakeCalendar="({create:function(){var live=false,onReturn;" +
   "g.drawString('CALENDAR READY',10,80);g.flip()}," +
   "touch:function(){if(onReturn)onReturn(undefined)},swipe:function(){}};}})";
 const nav=environment(base,{},undefined,{"orbit.cal.js":fakeCalendar});
-nav.execute("boot.js");nav.execute("app.js");nav.log.length=0;
+nav.execute("boot.js");nav.execute("app.js");nav.advance(base);nav.log.length=0;
 nav.b.ui.touch(1,{x:50,y:70});
 assert(nav.log.some(x=>x.op==="fillCircle"),"First tap needs instant cue");
 nav.advance(base+400);
@@ -329,7 +782,7 @@ nav.advance(base+402);
 assert(nav.log.filter(x=>x.op==="drawString").length>beforeReturn);
 const navSettings=environment(base,{},undefined,{"orbit.settings.js":
   "(function(back){g.drawString('SETTINGS READY',10,80);g.flip();})"});
-navSettings.execute("boot.js");navSettings.execute("app.js");
+navSettings.execute("boot.js");navSettings.execute("app.js");navSettings.advance(base);
 navSettings.log.length=0;
 navSettings.b.ui.touch(1,{x:30,y:60});
 navSettings.b.ui.touch(1,{x:30,y:60});
@@ -338,19 +791,48 @@ assert(!navSettings.log.some(x=>x.op==="drawString"&&x.args[0]==="SETTINGS READY
 navSettings.advance(base+1);
 assert(navSettings.log.some(x=>x.op==="drawString"&&x.args[0]==="SETTINGS READY"));
 const navWake=environment(base);
-navWake.execute("app.js");navWake.log.length=0;
+navWake.execute("app.js");navWake.advance(base);navWake.log.length=0;
 navWake.b.emit("lcdPower",true);
 assert(navWake.log.some(x=>x.op==="drawString"&&x.args[0]==="Orbit..."));
 navWake.advance(base+1);
 assert([...navWake.timers.values()].some(x=>x.ms<=10000),
   "LCD wake must re-arm its idle timeout");
 const navButton=environment(base);
-navButton.execute("app.js");navButton.log.length=0;
+navButton.execute("app.js");navButton.advance(base);navButton.log.length=0;
 navButton.b.ui.btn();
 assert(navButton.log.some(x=>x.op==="drawString"&&x.args[0]==="Launcher..."));
 assert(!navButton.log.some(x=>x.op==="showLauncher"));
 navButton.advance(base+1);
 assert(navButton.log.some(x=>x.op==="showLauncher"));
+// Clock h:m must never add a leading zero to either hour or minute.
+const timeAtNineFive=new Date(2026,9,19,9,5).getTime();
+const shortTime=environment(timeAtNineFive,{restEnabled:false,timePos:1,datePos:2});
+shortTime.execute("app.js");shortTime.advance(timeAtNineFive+100);
+assert(shortTime.log.some(x=>x.op==="drawString"&&x.args[0]==="9:5"),
+  "Clock time must be h:m without zero padding");
+
+// The immutable 128px North-polar bitmap contains Earth-relative water cuts.
+// These texture cells rotate with the globe: no screen-fixed strait strokes.
+const northMap=require("./earth-north-128.js").get();
+assert.strictEqual(northMap[0].width,128);
+assert.strictEqual(northMap[0].height,128);
+assert.strictEqual(northMap[0].buffer.byteLength,4096);
+assert.strictEqual(northMap[1].buffer.byteLength,2048);
+assert.strictEqual(northMap[0].palette[1],0x05A0,"Land uses the muted green palette");
+const packedNorth=new Uint8Array(northMap[0].buffer);
+function northPixel(x,y){
+  const q=y*128+x;
+  return (packedNorth[q>>2]>>(6-2*(q&3)))&3;
+}
+const straitCells=[[60,104],[61,104],[62,104],[63,104],[64,104],[65,104],
+  [58,115],[59,115],[60,115],[61,115],[63,115],[62,114],[63,114]];
+for(const [x,y] of straitCells)
+  assert.strictEqual(northPixel(x,y),0,
+    "Corrected water channel must be ocean at "+x+","+y);
+for(const [x,y] of [[61,101],[70,104],[57,114],[60,116]])
+  assert.strictEqual(northPixel(x,y),1,
+    "Nearby land must be retained at "+x+","+y);
+
 // Repeated 12.5 Hz accelerometer events should not allocate growing sample arrays.
 const perf=r.create({thresholdG:.027});
 const benchStart=Date.now(),benchSamples=15000;
@@ -366,5 +848,5 @@ console.log("PASS: tap/calendar/settings/wake/launcher immediate acknowledgement
 console.log("motion-first HRM-independent bars, still/no-pulse stage 0, still/pulse stage 5,");
 console.log("robust slot finalization, three-way HRM status,");
 console.log("bounded persisted diagnostics, 3-axis stillness and 1s filtering,");
-console.log("five-stage peak-ratio, v3 storage, early HRM-off,");
+console.log("five-stage 3D peak amplitude sum, v3 storage, early HRM-off,");
 console.log("12.5Hz events, 24 h history, idle lock/wake, app drawing.");

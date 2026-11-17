@@ -2,9 +2,9 @@
   "id": "orbit",
   "name": "tenkyu",
   "shortName": "tenkyu",
-  "version": "0.067",
+  "version": "0.109",
   "author": "onisY",
-  "description": "Sun-Earth-Moon clock with eclipse shading, five-stage rest graph, non-wear sensing and immediate visual feedback on screen transitions.",
+  "description": "Sun-Earth-Moon clock with eclipse alerts, rest-5-gated non-wear detection, grey non-wear / red battery-level charging bars and low-power HRM.",
   "icon": "app.png",
   "type": "clock",
   "tags": "clock,science,astronomy,calendar,moon",
@@ -19,6 +19,14 @@
       "url": "app.js"
     },
     {
+      "name": "orbit.north",
+      "url": "earth-north-128.js"
+    },
+    {
+      "name": "orbit.earth",
+      "url": "earth.js"
+    },
+    {
       "name": "orbit.cal.js",
       "url": "calendar.js"
     },
@@ -29,6 +37,10 @@
     {
       "name": "orbitloc",
       "url": "locations.js"
+    },
+    {
+      "name": "orbitcities.dat",
+      "url": "cities.dat"
     },
     {
       "name": "orbittz",
